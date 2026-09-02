@@ -1,4 +1,5 @@
 import { DEMO_INVENTORY, DEMO_PROFILE } from '../data/demo.js';
+import { getIngredientGuidance } from '../data/ingredientKnowledge.js';
 import { buildPlanReviewAt } from '../services/planning.js';
 
 const STORAGE_KEY = 'freshloop-demo-state-v4';
@@ -7,16 +8,56 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function reminderDateAfter(days) {
+  const date = new Date();
+  date.setHours(12, 0, 0, 0);
+  date.setDate(date.getDate() + Number(days));
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function daysFromNow(dateValue) {
+  if (!dateValue) return null;
+  const date = new Date(`${dateValue}T12:00:00`);
+  const now = new Date();
+  now.setHours(12, 0, 0, 0);
+  return Number.isFinite(date.getTime()) ? Math.ceil((date - now) / 86400000) : null;
+}
+
 function migrateInventory(items = []) {
   return items.map((item) => {
     const isTofu = item.canonicalName === 'tofu' || /豆腐/.test(item.name || '');
-    if (!isTofu || item.managementMode !== 'freshness_only') return item;
+    let next = item;
+    if (isTofu && item.managementMode === 'freshness_only') {
+      next = {
+        ...next,
+        managementMode: 'tracked_quantity',
+        quantity: Number(item.quantity) > 0 ? Number(item.quantity) : 1,
+        unit: item.unit || '盒',
+        stockPercentage: null
+      };
+    }
+
+    const guidance = getIngredientGuidance(next.name || next.canonicalName || '');
+    const dateManaged = guidance?.packageStateRelevant || next.uiCategory === 'staple' || next.uiCategory === 'condiment';
+    if (!dateManaged) return next;
+    const packageState = next.packageState || 'opened';
+    const resolved = getIngredientGuidance(next.name || next.canonicalName || '', packageState);
+    const storage = resolved?.storage?.find((option) => option.location === next.storageLocation && option.available);
+    let expiryDate = next.expiryDate;
+    if (!expiryDate && storage?.days) expiryDate = reminderDateAfter(storage.days);
+
+    const isOysterSauce = next.canonicalName === 'oyster sauce' || /蚝油|耗油/.test(next.name || '');
+    if (isOysterSauce && packageState === 'opened' && next.storageLocation === '冷藏') {
+      const remaining = daysFromNow(expiryDate);
+      if (remaining == null || remaining > 30) expiryDate = reminderDateAfter(30);
+    }
+
     return {
-      ...item,
-      managementMode: 'tracked_quantity',
-      quantity: Number(item.quantity) > 0 ? Number(item.quantity) : 1,
-      unit: item.unit || '盒',
-      stockPercentage: null
+      ...next,
+      packageState,
+      expiryDate,
+      freshnessConfidence: next.freshnessConfidence || 'medium',
+      freshnessSource: next.freshnessSource || 'opened_reference'
     };
   });
 }

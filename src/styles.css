@@ -332,6 +332,8 @@ svg { width: 18px; height: 18px; }
 .manual-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin: 16px 0; }
 .manual-fields label, .expiry-editor { display: flex; flex-direction: column; gap: 6px; font-size: 10px; font-weight: 750; }
 .manual-fields input, .manual-fields select, .expiry-editor input, .package-confirm input { width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.manual-fields .package-state-field { grid-column: 1 / -1; padding: 12px; border-radius: 12px; background: #f1f6f2; }
+.package-state-field small { color: var(--muted); font-weight: 600; }
 .manual-storage-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 7px; margin-top: 9px; }
 .manual-storage-option { position: relative; }
 .manual-storage-option input { position: absolute; opacity: 0; }

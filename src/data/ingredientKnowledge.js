@@ -23,6 +23,21 @@ const USDA_GROUND_BEEF_SOURCE = {
   url: 'https://www.fsis.usda.gov/food-safety/safe-food-handling-and-preparation/meat/ground-beef-and-food-safety'
 };
 
+const KIKKOMAN_SOY_SOURCE = {
+  title: 'Kikkoman · Soy Sauce Storage After Opening',
+  url: 'https://www.kikkoman.com/en/culture/soysaucemuseum/features/'
+};
+
+const KIKKOMAN_OYSTER_SOURCE = {
+  title: 'Kikkoman · Oyster Sauce Storage After Opening',
+  url: 'https://customer.kikkoman.co.jp/hc/ja/articles/57472936526873'
+};
+
+const LKK_OYSTER_SOURCE = {
+  title: 'Lee Kum Kee · Sauce Storage FAQ',
+  url: 'https://usa.lkk.com/faq'
+};
+
 const makeStorage = (location, days, available = true, note = '', meta = {}) => ({
   location,
   days,
@@ -32,8 +47,25 @@ const makeStorage = (location, days, available = true, note = '', meta = {}) => 
   source: meta.source || SFA_STORAGE_SOURCE,
   sourceRange: meta.sourceRange || '',
   preparation: meta.preparation || '',
-  qualityOnly: Boolean(meta.qualityOnly)
+  qualityOnly: Boolean(meta.qualityOnly),
+  openedDays: Object.prototype.hasOwnProperty.call(meta, 'openedDays') ? meta.openedDays : days,
+  openedAvailable: meta.openedAvailable ?? available,
+  openedNote: meta.openedNote || note,
+  sealedDays: Object.prototype.hasOwnProperty.call(meta, 'sealedDays') ? meta.sealedDays : days,
+  sealedAvailable: meta.sealedAvailable ?? available,
+  sealedNote: meta.sealedNote || note
 });
+
+export function applyPackageState(storage = [], packageState = 'opened') {
+  const prefix = packageState === 'sealed' ? 'sealed' : 'opened';
+  return storage.map((option) => ({
+    ...option,
+    days: option[`${prefix}Days`] ?? null,
+    available: Boolean(option[`${prefix}Available`]),
+    note: option[`${prefix}Note`] || option.note,
+    packageState
+  }));
+}
 
 export const INGREDIENT_KNOWLEDGE = [
   { keys: ['鸡蛋', '蛋'], canonicalName: 'egg', name: '鸡蛋', category: '蛋类', uiCategory: 'protein', icon: '🥚', unit: '个', quantity: 6, mode: 'tracked_quantity', requiresPackageDate: true, storage: [makeStorage('冷藏', 21, true, '以包装日期为准'), makeStorage('冷冻', null, false, '整颗带壳鸡蛋不建议冷冻'), makeStorage('常温', null, false, '新加坡气候下建议冷藏')], story: '一枚小小的圆，藏着早餐与家常菜的许多可能。', nature: '传统食养资料常记为性平', cooking: '近期可做番茄炒蛋、蒸蛋或溏心蛋。' },
@@ -49,11 +81,12 @@ export const INGREDIENT_KNOWLEDGE = [
   { keys: ['番茄', '西红柿'], canonicalName: 'tomato', name: '番茄', category: '蔬菜', uiCategory: 'produce', icon: '🍅', unit: '个', quantity: 2, mode: 'tracked_quantity', storage: [makeStorage('冷藏', 5, true, '完全成熟后冷藏，食用前回温风味更好'), makeStorage('冷冻', 30, true, '切块或煮成酱后密封；解冻后只建议用于熟食', { sourceRange: '冷冻会破坏鲜食质地', qualityOnly: true, preparation: '切块或制酱、密封' }), makeStorage('常温', 3, true, '未熟时可常温放至转红')], story: '红得明亮，也酸甜得坦率，最会让一锅菜有生气。', nature: '传统食养资料常记为性微寒', cooking: '可做番茄炒蛋、番茄炖牛肉或意面酱。' },
   { keys: ['香蕉'], canonicalName: 'banana', name: '香蕉', category: '水果', uiCategory: 'produce', icon: '🍌', unit: '根', quantity: 4, mode: 'freshness_only', storage: [makeStorage('冷藏', 4, true, '成熟后冷藏，表皮变黑不等于果肉变坏'), makeStorage('冷冻', 30, true, '去皮切段，适合奶昔与烘焙'), makeStorage('常温', 3, true, '未熟时常温催熟')], story: '热带的甜意弯成一轮小月，熟得刚好时最温柔。', nature: '传统食养资料常记为性寒', cooking: '可做燕麦杯、奶昔或香蕉煎饼。' },
   { keys: ['苹果'], canonicalName: 'apple', name: '苹果', category: '水果', uiCategory: 'produce', icon: '🍎', unit: '个', quantity: 4, mode: 'freshness_only', storage: [makeStorage('冷藏', 21, true, '与叶菜分开放置'), makeStorage('冷冻', 90, true, '切片后更适合烘焙'), makeStorage('常温', 7, true, '避光通风')], story: '脆响的一口，像把清晨的风也咬进了果香里。', nature: '传统食养资料常记为性凉', cooking: '可鲜食、烤苹果或加入沙拉。' },
-  { keys: ['面条', '挂面', '意面'], canonicalName: 'noodle', name: '面条', category: '主食', uiCategory: 'staple', icon: '🍜', unit: '包', quantity: 1, mode: 'approximate_stock', storage: [makeStorage('冷藏', null, false, '干面无需冷藏'), makeStorage('冷冻', null, false, '干面无需冷冻'), makeStorage('常温', 180, true, '密封防潮，以包装日期为准')], story: '一缕一缕，最懂得把汤汁和家常的香气牵在一起。', nature: '传统食养资料常记为性平', cooking: '可做葱油拌面、汤面或番茄意面。' },
-  { keys: ['大米', '米'], canonicalName: 'rice', name: '大米', category: '主食', uiCategory: 'staple', icon: '🍚', unit: '克', quantity: 1000, mode: 'approximate_stock', storage: [makeStorage('冷藏', null, false, '干米通常无需冷藏'), makeStorage('冷冻', null, false, '干米通常无需冷冻'), makeStorage('常温', 180, true, '密封、防潮、避虫')], story: '一粒米很小，却一直是许多家常味道的中心。', nature: '传统食养资料常记为性平', cooking: '可煮饭、煲粥或做炒饭。' },
+  { keys: ['面条', '挂面', '意面'], canonicalName: 'noodle', name: '面条', category: '主食', uiCategory: 'staple', icon: '🍜', unit: '包', quantity: 1, mode: 'approximate_stock', requiresPackageDate: true, packageStateRelevant: true, storage: [makeStorage('冷藏', null, false, '干面通常无需冷藏'), makeStorage('冷冻', null, false, '干面通常无需冷冻'), makeStorage('常温', 180, true, '开封后密封防潮并记录日期', { openedDays: 180, openedNote: '已开封：密封、防潮、避免虫害；包装说明优先', sealedDays: 365, sealedNote: '未开封：以包装最佳食用日期为准；一年仅作缺少包装日期时的提醒占位' })], story: '一缕一缕，最懂得把汤汁和家常的香气牵在一起。', nature: '传统食养资料常记为性平', cooking: '可做葱油拌面、汤面或番茄意面。' },
+  { keys: ['大米', '米'], canonicalName: 'rice', name: '大米', category: '主食', uiCategory: 'staple', icon: '🍚', unit: '克', quantity: 1000, mode: 'approximate_stock', requiresPackageDate: true, packageStateRelevant: true, storage: [makeStorage('冷藏', null, false, '干米通常无需冷藏'), makeStorage('冷冻', null, false, '干米通常无需冷冻'), makeStorage('常温', 180, true, '开封后密封、防潮、避虫', { openedDays: 180, openedNote: '已开封：密封、防潮、避虫，并记录开封日', sealedDays: 365, sealedNote: '未开封：包装日期优先；一年仅作缺少包装日期时的提醒占位' })], story: '一粒米很小，却一直是许多家常味道的中心。', nature: '传统食养资料常记为性平', cooking: '可煮饭、煲粥或做炒饭。' },
   { keys: ['红薯', '番薯', '地瓜'], canonicalName: 'sweet potato', name: '红薯', category: '主食', uiCategory: 'staple', icon: '🍠', unit: '个', quantity: 2, mode: 'tracked_quantity', storage: [makeStorage('冷藏', null, false, '生红薯低温久放易影响品质'), makeStorage('冷冻', 60, true, '蒸熟后分装冷冻'), makeStorage('常温', 14, true, '阴凉、干燥、通风')], story: '土里的甜，经过火候后变得绵软而踏实。', nature: '传统食养资料常记为性平', cooking: '可烤、蒸或切块煮粥。' },
-  { keys: ['酱油', '生抽'], canonicalName: 'soy sauce', name: '酱油', category: '调味品', uiCategory: 'condiment', icon: '🫙', unit: '瓶', quantity: 1, mode: 'approximate_stock', storage: [makeStorage('冷藏', 90, true, '开封后冷藏更利于保持品质'), makeStorage('冷冻', null, false, '无需冷冻'), makeStorage('常温', 60, true, '依包装说明；未开封可常温')], story: '一小勺酱香，常常就是家常菜的底色。', nature: '调味品不作寒热判断', cooking: '适合炒菜、腌肉与调制蘸汁。' },
-  { keys: ['食用油', '橄榄油', '花生油'], canonicalName: 'cooking oil', name: '食用油', category: '调味品', uiCategory: 'condiment', icon: '🫒', unit: '瓶', quantity: 1, mode: 'approximate_stock', storage: [makeStorage('冷藏', null, false, '多数食用油无需冷藏'), makeStorage('冷冻', null, false, '无需冷冻'), makeStorage('常温', 120, true, '密封、避光、远离炉火')], story: '看似安静的一滴油，会把香气从锅底慢慢托起来。', nature: '不同油脂传统属性不一', cooking: '按烟点选择凉拌、煎炒或烘焙。' },
+  { keys: ['蚝油', '耗油'], canonicalName: 'oyster sauce', name: '蚝油', category: '调味品', uiCategory: 'condiment', icon: '🫙', unit: '瓶', quantity: 1, mode: 'approximate_stock', requiresPackageDate: true, packageStateRelevant: true, storage: [makeStorage('冷藏', 30, true, '开封后冷藏；不同品牌标注差异较大，包装说明优先', { source: KIKKOMAN_OYSTER_SOURCE, sourceRange: '常见品牌开封冷藏建议约 1–6 个月；FreshLoop 默认采用保守的 30 天提醒', openedDays: 30, openedAvailable: true, openedNote: '已开封：约 4°C 冷藏并保持瓶口清洁；包装若写明更短期限，以包装为准', sealedDays: null, sealedAvailable: false, sealedNote: '未开封通常按包装要求常温储存，无需占用冷藏空间' }), makeStorage('冷冻', null, false, '不建议冷冻，质地可能改变且玻璃瓶可能破裂', { source: LKK_OYSTER_SOURCE }), makeStorage('常温', null, false, '开封后不使用常温期限', { source: LKK_OYSTER_SOURCE, openedDays: null, openedAvailable: false, openedNote: '已开封：常见品牌要求冷藏，不把常温与冷藏套成同一期限', sealedDays: 365, sealedAvailable: true, sealedNote: '未开封：可按包装条件常温保存；请优先录入瓶身最佳食用日期' })], story: '浓稠的一勺鲜香，最会把蔬菜和肉味轻轻拢在一起。', nature: '调味品不作寒热判断', cooking: '适合炒蔬菜、腌肉与调制芡汁。' },
+  { keys: ['酱油', '生抽'], canonicalName: 'soy sauce', name: '酱油', category: '调味品', uiCategory: 'condiment', icon: '🫙', unit: '瓶', quantity: 1, mode: 'approximate_stock', requiresPackageDate: true, packageStateRelevant: true, storage: [makeStorage('冷藏', 90, true, '普通瓶开封后冷藏更利于保持色泽与风味', { source: KIKKOMAN_SOY_SOURCE, openedDays: 90, openedNote: '已开封普通瓶：建议冷藏并在 90 天内优先用完；包装说明优先', sealedDays: null, sealedAvailable: false, sealedNote: '未开封通常按包装要求常温储存' }), makeStorage('冷冻', null, false, '无需冷冻'), makeStorage('常温', 30, true, '普通瓶开封后仍优先冷藏；只有包装明确允许时才常温', { source: KIKKOMAN_SOY_SOURCE, openedDays: 30, openedAvailable: true, openedNote: '已开封普通瓶：常温仅作 30 天保守品质提醒；特殊密封瓶可按包装标注延长', sealedDays: 365, sealedAvailable: true, sealedNote: '未开封：按包装最佳食用日期；一年仅作缺少包装日期时的提醒占位' })], story: '一小勺酱香，常常就是家常菜的底色。', nature: '调味品不作寒热判断', cooking: '适合炒菜、腌肉与调制蘸汁。' },
+  { keys: ['食用油', '橄榄油', '花生油'], canonicalName: 'cooking oil', name: '食用油', category: '调味品', uiCategory: 'condiment', icon: '🫒', unit: '瓶', quantity: 1, mode: 'approximate_stock', requiresPackageDate: true, packageStateRelevant: true, storage: [makeStorage('冷藏', null, false, '多数食用油无需冷藏'), makeStorage('冷冻', null, false, '无需冷冻'), makeStorage('常温', 120, true, '开封后密封、避光、远离炉火', { openedDays: 120, openedNote: '已开封：密封、避光、远离炉火，并留意哈喇味', sealedDays: 365, sealedNote: '未开封：包装日期优先；一年仅作缺少包装日期时的提醒占位' })], story: '看似安静的一滴油，会把香气从锅底慢慢托起来。', nature: '不同油脂传统属性不一', cooking: '按烟点选择凉拌、煎炒或烘焙。' },
   { keys: ['燕麦棒', '能量棒', '谷物棒'], canonicalName: 'granola bar', name: '燕麦棒', category: '其他食品', uiCategory: 'other', icon: '🌾', unit: '根', quantity: 4, mode: 'freshness_only', requiresPackageDate: true, storage: [makeStorage('冷藏', null, false, '通常无需冷藏'), makeStorage('冷冻', null, false, '通常无需冷冻'), makeStorage('常温', 90, true, '密封防潮，以包装日期为准')], story: '谷物压成轻巧的一块，把忙碌时刻稳稳接住。', nature: '加工食品不作寒热判断', cooking: '可直接食用，或切碎撒在酸奶上。' },
   { keys: ['小葱', '葱'], canonicalName: 'scallion', name: '小葱', category: '蔬菜', uiCategory: 'produce', icon: '🌿', unit: '把', quantity: 1, mode: 'tracked_quantity', storage: [makeStorage('冷藏', 7, true, '吸湿包裹后冷藏'), makeStorage('冷冻', 30, true, '切碎后冷冻作调味'), makeStorage('常温', 1, true, '尽量当天使用')], story: '一点翠绿落在热菜上，香气就有了醒目的句号。', nature: '传统食养资料常记为性温', cooking: '可做葱油、蛋饼或汤面点缀。' }
 ].map((item) => ({
@@ -66,8 +99,8 @@ const FALLBACKS = [
   { test: /菜|瓜|菇|椒|笋/, category: '蔬菜', uiCategory: 'produce', icon: '🥬', unit: '克', quantity: 200, mode: 'tracked_quantity', storage: [makeStorage('冷藏', 3, true, '仅作短期占位；需要具体品种才能给出更准确期限'), makeStorage('冷冻', null, false, '不同蔬菜对焯水、切分和冷冻的要求差异很大，请补充具体品种'), makeStorage('常温', 1, true, '仅作一般短期参考')] },
   { test: /果|梨|桃|莓|橙|柑|葡萄/, category: '水果', uiCategory: 'produce', icon: '🍎', unit: '个', quantity: 4, mode: 'freshness_only', storage: [makeStorage('冷藏', 5, true, '仅作成熟水果的短期占位；具体品种与成熟度优先'), makeStorage('冷冻', null, false, '需要具体品种与预处理方式，不能统一套用期限'), makeStorage('常温', 2, true, '未熟水果可短期常温，具体品种优先')] },
   { test: /肉|排|虾|蟹|贝/, category: '肉类与海鲜', uiCategory: 'protein', icon: '🥩', unit: '克', quantity: 200, mode: 'tracked_quantity', requiresPackageDate: true, storage: [makeStorage('冷藏', 1, true, '这是保守占位；请补充具体部位、是否绞碎和包装日期'), makeStorage('冷冻', null, false, '肉类与海鲜不能使用统一期限，请补充品种、形态和包装状态'), makeStorage('常温', null, false, '生鲜肉与海鲜不可常温久放')] },
-  { test: /粉|面|米|麦|薯|馒头|面包/, category: '主食', uiCategory: 'staple', icon: '🌾', unit: '克', quantity: 200, mode: 'approximate_stock', storage: [makeStorage('冷藏', null, false, '视包装说明'), makeStorage('冷冻', null, false, '视包装说明'), makeStorage('常温', 60, true, '密封防潮')] },
-  { test: /酱|油|盐|糖|醋|胡椒|香料/, category: '调味品', uiCategory: 'condiment', icon: '🧂', unit: '瓶', quantity: 1, mode: 'approximate_stock', storage: [makeStorage('冷藏', 90, true, '开封后视包装说明'), makeStorage('冷冻', null, false, '通常无需冷冻'), makeStorage('常温', 90, true, '避光密封')] }
+  { test: /粉|面|米|麦|薯|馒头|面包/, category: '主食', uiCategory: 'staple', icon: '🌾', unit: '克', quantity: 200, mode: 'approximate_stock', requiresPackageDate: true, packageStateRelevant: true, storage: [makeStorage('冷藏', null, false, '视具体主食与包装说明'), makeStorage('冷冻', null, false, '视具体主食与包装说明'), makeStorage('常温', 60, true, '开封后密封防潮；具体品种和包装日期优先', { openedDays: 60, sealedDays: 180, sealedNote: '未开封：请优先录入包装最佳食用日期' })] },
+  { test: /酱|油|盐|糖|醋|胡椒|香料/, category: '调味品', uiCategory: 'condiment', icon: '🧂', unit: '瓶', quantity: 1, mode: 'approximate_stock', requiresPackageDate: true, packageStateRelevant: true, storage: [makeStorage('冷藏', 90, true, '开封后视具体配方和包装说明', { openedDays: 90, sealedDays: null, sealedAvailable: false }), makeStorage('冷冻', null, false, '通常无需冷冻'), makeStorage('常温', 60, true, '避光密封；包装说明优先', { openedDays: 60, sealedDays: 365, sealedNote: '未开封：请优先录入包装最佳食用日期' })] }
 ];
 
 function fallbackGuidance(rawName) {
@@ -88,16 +121,21 @@ function fallbackGuidance(rawName) {
   };
 }
 
-export function getIngredientGuidance(rawName = '') {
+export function getIngredientGuidance(rawName = '', packageState = 'opened') {
   const name = rawName.trim();
   if (!name) return null;
   const exact = INGREDIENT_KNOWLEDGE.flatMap((item) => item.keys.map((key) => ({ item, key })))
     .filter(({ key }) => name === key || (key.length >= 2 && name.includes(key)))
     .sort((a, b) => b.key.length - a.key.length)[0]?.item;
-  return exact ? { ...exact, name, confidence: 0.94, needsReview: Boolean(exact.requiresPackageDate) } : fallbackGuidance(name);
+  const matched = exact ? { ...exact, name, confidence: 0.94, needsReview: Boolean(exact.requiresPackageDate) } : fallbackGuidance(name);
+  return {
+    ...matched,
+    packageState: matched.packageStateRelevant ? packageState : null,
+    storage: applyPackageState(matched.storage, matched.packageStateRelevant ? packageState : 'opened')
+  };
 }
 
-export const STORAGE_RETRIEVAL_SOURCES = [SFA_STORAGE_SOURCE, SFA_LABEL_SOURCE, USDA_FREEZING_SOURCE, USDA_BEEF_SOURCE, USDA_GROUND_BEEF_SOURCE];
+export const STORAGE_RETRIEVAL_SOURCES = [SFA_STORAGE_SOURCE, SFA_LABEL_SOURCE, USDA_FREEZING_SOURCE, USDA_BEEF_SOURCE, USDA_GROUND_BEEF_SOURCE, KIKKOMAN_SOY_SOURCE, KIKKOMAN_OYSTER_SOURCE, LKK_OYSTER_SOURCE];
 
 const PRECISE_ICON_RULES = [
   { test: /^(?:干辣椒|小米辣|鲜辣椒|红辣椒|青辣椒|泡椒|朝天椒|dried chili|fresh chili|bird'?s eye chili|pickled chili)$/i, icon: '🌶️' },

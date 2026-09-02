@@ -116,6 +116,26 @@ test('storage retrieval distinguishes ground beef from whole beef and avoids gen
   assert.equal(unknownMeat.storage.find((item) => item.location === '冷冻').available, false);
 });
 
+test('opened oyster sauce uses a shorter refrigerated reminder and no room-temperature duplicate', () => {
+  const opened = getIngredientGuidance('蚝油', 'opened');
+  const sealed = getIngredientGuidance('蚝油', 'sealed');
+  assert.equal(opened.canonicalName, 'oyster sauce');
+  assert.equal(opened.storage.find((item) => item.location === '冷藏').days, 30);
+  assert.equal(opened.storage.find((item) => item.location === '常温').available, false);
+  assert.equal(sealed.storage.find((item) => item.location === '冷藏').available, false);
+  assert.equal(sealed.storage.find((item) => item.location === '常温').days, 365);
+});
+
+test('staples and condiments always carry package-state quality reminders', () => {
+  const rice = getIngredientGuidance('大米', 'opened');
+  const soy = getIngredientGuidance('酱油', 'opened');
+  assert.equal(rice.requiresPackageDate, true);
+  assert.equal(rice.storage.find((item) => item.location === '常温').days, 180);
+  assert.equal(soy.requiresPackageDate, true);
+  assert.equal(soy.storage.find((item) => item.location === '冷藏').days, 90);
+  assert.equal(DEMO_INVENTORY.every((item) => Boolean(item.expiryDate)), true);
+});
+
 test('recipe picker excludes staples, other foods, condiments, milk and yogurt', () => {
   const names = recipeSelectableInventory(DEMO_INVENTORY).map((item) => item.canonicalName);
   for (const excluded of ['rice', 'granola bar', 'soy sauce', 'cooking oil', 'milk', 'yogurt']) assert.equal(names.includes(excluded), false);

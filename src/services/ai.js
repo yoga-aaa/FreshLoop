@@ -84,10 +84,14 @@ function adjustForApplianceTemperatures(storage, temperatures = {}) {
   });
 }
 
-function candidateFromKnowledge(name, overrides = {}, temperatures = {}) {
-  const info = getIngredientGuidance(name);
+function candidateFromKnowledge(name, overrides = {}, temperatures = {}, packageState = 'opened') {
+  const info = getIngredientGuidance(name, packageState);
   const storageOptions = adjustForApplianceTemperatures(info.storage, temperatures);
   const preferred = storageOptions.find((item) => item.available) || storageOptions[0];
+  const packageStateOptions = info.packageStateRelevant ? {
+    opened: adjustForApplianceTemperatures(getIngredientGuidance(name, 'opened').storage, temperatures),
+    sealed: adjustForApplianceTemperatures(getIngredientGuidance(name, 'sealed').storage, temperatures)
+  } : null;
   return {
     name,
     normalizedName: info.canonicalName,
@@ -98,6 +102,9 @@ function candidateFromKnowledge(name, overrides = {}, temperatures = {}) {
     unit: info.unit,
     storageLocation: preferred.location,
     storageOptions,
+    packageState,
+    packageStateRelevant: Boolean(info.packageStateRelevant),
+    packageStateOptions,
     applianceTemperatures: temperatures,
     freezable: Boolean(storageOptions.find((item) => item.location === '冷冻')?.available),
     refrigeratedDays: storageOptions.find((item) => item.location === '冷藏')?.days || null,
@@ -114,12 +121,12 @@ function candidateFromKnowledge(name, overrides = {}, temperatures = {}) {
   };
 }
 
-export async function getStorageGuidance(name, temperatures = {}) {
+export async function getStorageGuidance(name, temperatures = {}, packageState = 'opened') {
   if (import.meta.env?.VITE_REMOTE_STORAGE_GUIDANCE !== 'true') {
     await new Promise((resolve) => setTimeout(resolve, 180));
-    return candidateFromKnowledge(name, { retrievalMode: 'curated_knowledge_base' }, temperatures);
+    return candidateFromKnowledge(name, { retrievalMode: 'curated_knowledge_base' }, temperatures, packageState);
   }
-  return requestJson('/api/ingredient-guidance', { name, locale: 'Singapore', temperatures }, '食材资料检索暂时不可用');
+  return requestJson('/api/ingredient-guidance', { name, locale: 'Singapore', temperatures, packageState }, '食材资料检索暂时不可用');
 }
 
 export async function analyzeInventory(payload) {

@@ -12,15 +12,20 @@ function applyTemperatureBasis(storage, temperatures = {}) {
 
 export default async function handler(request, response) {
   if (request.method !== 'POST') return response.status(405).json({ error: 'Method not allowed' });
-  const { name, locale = 'Singapore', temperatures = {} } = parseRequestBody(request);
+  const { name, locale = 'Singapore', temperatures = {}, packageState = 'opened' } = parseRequestBody(request);
   if (!name?.trim()) return response.status(400).json({ error: 'Ingredient name is required' });
-  const info = getIngredientGuidance(name.trim());
+  const info = getIngredientGuidance(name.trim(), packageState);
   const storageOptions = applyTemperatureBasis(info.storage, temperatures);
   const preferred = storageOptions.find((item) => item.available) || storageOptions[0];
+  const packageStateOptions = info.packageStateRelevant ? {
+    opened: applyTemperatureBasis(getIngredientGuidance(name.trim(), 'opened').storage, temperatures),
+    sealed: applyTemperatureBasis(getIngredientGuidance(name.trim(), 'sealed').storage, temperatures)
+  } : null;
   return response.status(200).json({
     name: name.trim(), normalizedName: info.canonicalName, category: info.category, uiCategory: info.uiCategory,
     suggestedManagementMode: info.mode, quantity: info.quantity, unit: info.unit, storageLocation: preferred.location,
     storageOptions, expiryRequired: Boolean(info.requiresPackageDate), confidence: info.confidence,
+    packageState, packageStateRelevant: Boolean(info.packageStateRelevant), packageStateOptions,
     needsUserReview: info.needsReview, icon: info.icon, story: info.story, nature: info.nature, cooking: info.cooking,
     source: info.source, applianceTemperatures: temperatures,
     retrieval: { mode: 'curated-source-rag', locale, matchedKeys: info.keys || [], conservativeFallback: Boolean(info.needsReview && info.confidence < 0.8) }

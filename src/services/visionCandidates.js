@@ -1,3 +1,5 @@
+import { getIngredientGuidance } from '../data/ingredientKnowledge.js';
+
 const STORAGE_LOCATIONS = ['冷藏', '冷冻', '常温'];
 const MODES = new Set(['tracked_quantity', 'freshness_only', 'approximate_stock']);
 
@@ -84,7 +86,11 @@ function candidateEntries(raw) {
 export function normalizeVisionCandidate(raw = {}) {
   const candidate = raw && typeof raw === 'object' ? raw : {};
   const name = String(candidate.name || candidate.productName || candidate.ingredientName || '').trim();
-  const storageOptions = normalizeStorageOptions(candidate.storageOptions || candidate.storage || candidate.storageMethods);
+  const rawPackageState = String(candidate.packageState || '').toLowerCase();
+  const packageState = rawPackageState === 'sealed' ? 'sealed' : rawPackageState === 'opened' ? 'opened' : 'unknown';
+  const knowledge = getIngredientGuidance(name, packageState === 'sealed' ? 'sealed' : 'opened');
+  const knowledgeBackedStorage = knowledge?.confidence >= 0.9 ? knowledge.storage : null;
+  const storageOptions = normalizeStorageOptions(knowledgeBackedStorage || candidate.storageOptions || candidate.storage || candidate.storageMethods);
   const countableTofu = /豆腐|tofu/i.test(`${name} ${candidate.normalizedName || ''}`);
   let suggestedManagementMode = MODES.has(candidate.suggestedManagementMode) ? candidate.suggestedManagementMode : candidate.mode;
   if (!MODES.has(suggestedManagementMode)) suggestedManagementMode = 'tracked_quantity';
@@ -106,8 +112,12 @@ export function normalizeVisionCandidate(raw = {}) {
     suggestedManagementMode,
     quantity,
     unit,
+    packageState,
+    packageStateRelevant: Boolean(knowledge?.packageStateRelevant),
     storageLocation: preferred.location,
-    storageOptions
+    storageOptions,
+    expiryRequired: true,
+    needsUserReview: Boolean(candidate.needsUserReview || packageState === 'unknown' || knowledge?.requiresPackageDate)
   };
 }
 
