@@ -1,10 +1,12 @@
 import { EXTRA_EN } from './i18nExtra.js';
 import { STORAGE_EN } from './storageEnglish.js';
 import { localizeEnglishDates } from './dateInput.js';
+import { INGREDIENT_EN } from './data/ingredientLabels.js';
 
 const EN = new Map(Object.entries({
   ...EXTRA_EN,
   ...STORAGE_EN,
+  ...INGREDIENT_EN,
   '收藏': 'Save recipe', '取消收藏': 'Unsave recipe',
   '切换界面和菜谱语言；已有菜谱翻译后缓存，自填偏好保留原文。': 'Changes the interface and recipes. Existing recipes are translated and cached; your own preference notes stay unchanged.',
   '必备食材当前无库存': 'Essential ingredient is out of stock',
@@ -18,6 +20,7 @@ const EN = new Map(Object.entries({
   '食材库': 'Inventory', '食谱': 'Recipes', '采购': 'Shopping', '档案': 'Profile',
   '全部': 'All', '肉蛋奶及蛋白质': 'Protein & dairy', '蔬菜水果': 'Produce', '主食及碳水': 'Staples', '调味品': 'Condiments', '其他食品': 'Other',
   '冷藏': 'Fridge', '冷冻': 'Freezer', '常温': 'Room temp',
+  '螃蟹': 'Crab', '肉类与海鲜': 'Meat & seafood', '菜心': 'Choy sum', '通心菜': 'Water spinach', '空心菜': 'Water spinach',
   '录入新食材': 'Add ingredients', '手动添加食材': 'Add manually', '上传小票': 'Upload receipt', '上传合照': 'Upload photo',
   '搜索食材名或储存方式': 'Search ingredient or storage', '管理': 'Manage', '完成': 'Done',
   '今日推荐': "Today's recommendations", '此刻想法': 'Meal request', '收藏夹': 'Favorites', '换一组': 'Refresh', '更新中…': 'Updating…',

@@ -1,3 +1,5 @@
+import { matchIngredientIcon } from './ingredientIcons.js';
+
 const SFA_STORAGE_SOURCE = {
   title: 'Singapore Food Agency · Food Safety Tips',
   url: 'https://www.sfa.gov.sg/food-safety-tips/safe-food-practices/food-safety-tips'
@@ -137,25 +139,8 @@ export function getIngredientGuidance(rawName = '', packageState = 'opened') {
 
 export const STORAGE_RETRIEVAL_SOURCES = [SFA_STORAGE_SOURCE, SFA_LABEL_SOURCE, USDA_FREEZING_SOURCE, USDA_BEEF_SOURCE, USDA_GROUND_BEEF_SOURCE, KIKKOMAN_SOY_SOURCE, KIKKOMAN_OYSTER_SOURCE, LKK_OYSTER_SOURCE];
 
-const PRECISE_ICON_RULES = [
-  { test: /^(?:欧芹|香菜|parsley|coriander|cilantro)$/i, icon: '🌿' },
-  { test: /^(?:干辣椒|小米辣|鲜辣椒|红辣椒|青辣椒|泡椒|朝天椒|dried chili|fresh chili|bird'?s eye chili|pickled chili)$/i, icon: '🌶️' },
-  { test: /^(?:米粉|米线|河粉|粉丝|rice noodles?)$/i, icon: '🍜' },
-  { test: /^(?:米醋|陈醋|白醋|香醋|黑醋|果醋|醋|rice vinegar|black vinegar|vinegar)$/i, icon: '🫙' },
-  { test: /^(?:鸡翅|鸡腿|鸡胸肉?|鸡肉|chicken wings?|chicken legs?|chicken breast|chicken)$/i, icon: '🍗' },
-  { test: /^(?:虾|鲜虾|明虾|prawn|shrimp)$/i, icon: '🍤' },
-  { test: /^(?:洋葱|onion)$/i, icon: '🧅' },
-  { test: /^(?:蒜|大蒜|蒜末|garlic)$/i, icon: '🧄' },
-  { test: /^(?:姜|生姜|ginger)$/i, icon: '🫚' },
-  { test: /^(?:黄瓜|青瓜|cucumber)$/i, icon: '🥒' },
-  { test: /^(?:土豆|马铃薯|potato)$/i, icon: '🥔' },
-  { test: /^(?:玉米|corn)$/i, icon: '🌽' },
-  { test: /^(?:蘑菇|香菇|口蘑|菌菇|mushroom)$/i, icon: '🍄' },
-  { test: /^(?:面包|吐司|bread|toast)$/i, icon: '🍞' }
-];
-
 export function ingredientIcon(name = '') {
-  const precise = PRECISE_ICON_RULES.find((rule) => rule.test.test(String(name).trim()));
-  if (precise) return precise.icon;
+  const matched = matchIngredientIcon(name, INGREDIENT_KNOWLEDGE);
+  if (matched) return matched;
   return getIngredientGuidance(name)?.icon || '🛍️';
 }

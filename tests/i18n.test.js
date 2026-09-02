@@ -48,7 +48,8 @@ test('static interface copy and placeholders have English translations, includin
   const source = fs.readFileSync(new URL('../src/main.js', import.meta.url), 'utf8').replace(/function userNoticeSections\(\)[\s\S]*?(?=function renderUserNotice)/, '');
   const strings = [...source.matchAll(/>([^<>]*[\u3400-\u9fff][^<>]*)</g)].map((m) => m[1].trim());
   const placeholders = [...source.matchAll(/placeholder="([^"]+)"/g)].map((m) => m[1]);
-  const candidates = [...new Set(strings)].filter((s) => s && s !== '中文' && !/[{}]|=>|\|\||const /.test(s) && s.length < 450);
+  // Language selectors intentionally keep both autonyms readable in either UI.
+  const candidates = [...new Set(strings)].filter((s) => s && !['中文', '语言 / Language'].includes(s) && !/[{}]|=>|\|\||const /.test(s) && s.length < 450);
   assert.deepEqual(candidates.filter((s) => /[\u3400-\u9fff]/.test(translateLabel(s))), []);
   // Placeholder examples have their own map; assert the key regression via browser tests as well.
   assert.ok(placeholders.includes('请输入食材名称'));
@@ -68,6 +69,12 @@ test('curated storage references and ingredient notes are fully translated witho
 });
 
 test('dynamic dates, warnings and delayed messages render in English', () => {
+  assert.equal(translateLabel('螃蟹'), 'Crab');
+  assert.equal(translateLabel('三文鱼'), 'Salmon');
+  assert.equal(translateLabel('肉类与海鲜 · 冷藏 · 品质提醒 9/2'), 'Meat & seafood · Fridge · Quality reminder 9/2');
+  assert.equal(translateLabel('海鲜 · 冷藏 · 品质提醒 9/3'), 'Seafood · Fridge · Quality reminder 9/3');
+  assert.equal(translateLabel('肉类 · 冷藏 · 已开封 · 品质提醒 9/5'), 'Meat · Fridge · Opened · Quality reminder 9/5');
+  assert.equal(translateLabel('调味品 · 常温 · 未开封 · 品质提醒 12/1'), 'Condiments · Room temp · Sealed · Quality reminder 12/1');
   for (const message of ['2 项已过期并保留在列表中，以紫色标记。你可以在管理模式中删除。', '建议 30 天内 · 至 2026-10-02', '前提：焯水、冷却、挤干、密封', '真实图片识别服务暂时不可用：等待超过 65 秒，已停止本次请求，请重试', '自动归入「肉蛋奶及蛋白质」；加入列表时才匹配食材图标。', '今天的「Pasta」做了吗？']) {
     assert.doesNotMatch(translateLabel(message), /[\u3400-\u9fff]/);
   }

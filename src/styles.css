@@ -607,8 +607,10 @@ body { font-size: 16px; line-height: 1.55; }
 .user-notice-actions button { flex: 0 0 auto; min-height: 52px; padding: 0 24px; }
 .profile-legal-actions { display: flex; justify-content: center; gap: 12px; margin-top: 20px; }
 .profile-legal-actions .reset-link { margin: 0; }
-.notice-language { display: flex; justify-content: flex-end; gap: 6px; margin: -10px 0 18px; }
-.notice-language button { padding: 8px 13px; border: 1px solid #dce4dd; border-radius: 999px; color: #6b7a72; background: #fff; font-size: 13px; font-weight: 750; }
+.notice-language { position: sticky; top: 10px; z-index: 2; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin: -10px 0 22px; padding: 10px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,.97); box-shadow: 0 4px 16px rgba(28,54,42,.05); }
+.notice-language > span { margin-right: auto; color: var(--muted); font-size: 14px; }
+.notice-language button { min-height: 44px; padding: 8px 16px; border: 1px solid #dce4dd; border-radius: 999px; color: #53645a; background: #fff; font-size: 15px; font-weight: 750; }
+.notice-language button:focus-visible { outline: 3px solid var(--green); outline-offset: 3px; }
 .notice-language button.active { color: #fff; border-color: var(--green); background: var(--green); }
 .language-setting { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: 18px 0 0; padding: 16px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .language-setting > span { display: flex; flex-direction: column; gap: 4px; }
@@ -757,3 +759,24 @@ html[lang="en"] .temperature-setup.compact { grid-template-columns: 1fr; }
 }
 [data-onboarding-meal][hidden] { display: none; }
 .recipe-translation-status { margin: 0 0 1rem; padding: 1rem 1.25rem; border-radius: 16px; background: #e8f3ed; color: #2d7050; font-size: 1rem; }
+
+/* Keep both inventory panes above the fixed navigation. Short windows can scroll
+   the rail independently instead of clipping the ingredient-entry controls. */
+@media (min-width: 821px) {
+  .content:has(.inventory-layout) { padding-top: 16px; padding-bottom: 110px; }
+  .inventory-rail { overflow-y: auto; overflow-x: hidden; padding: 18px 18px 22px; overscroll-behavior: contain; scrollbar-gutter: stable; }
+  .inventory-rail > * { flex-shrink: 0; min-width: 0; }
+  .inventory-rail .rail-heading h1 { line-height: 1.2; }
+  .inventory-rail .rail-heading > p:last-child { margin-top: 8px; font-size: 14px; line-height: 1.4; }
+  .inventory-rail .rail-metrics { margin: 14px 0; padding: 10px 0; }
+  .inventory-rail .rail-metrics span { line-height: 1.35; }
+  .inventory-rail .rail-section { margin-bottom: 14px; }
+  .inventory-rail .rail-section-title { margin-bottom: 6px; }
+  .inventory-rail .storage-choice { min-height: 42px; gap: 5px; padding: 7px 8px; text-align: left; }
+  .inventory-rail .capture-panel { padding: 12px; }
+  .inventory-rail .capture-panel > p { margin: 6px 0 10px; line-height: 1.4; }
+  .inventory-rail .capture-panel > .primary-button { min-height: 44px; padding: 9px 10px; font-size: 15px; }
+  .inventory-rail .capture-buttons { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 7px 0 0; }
+  .inventory-rail .capture-buttons button { min-width: 0; min-height: 44px; padding: 8px 5px; font-size: 14px; line-height: 1.35; }
+  .inventory-rail .capture-panel button svg { flex-shrink: 0; }
+}

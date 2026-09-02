@@ -9,6 +9,7 @@ import { applyMealConsumption, buildShoppingList, daysUntil, expiryLabel, expiry
 import { condimentInventory, recipeSelectableInventory } from './services/recipePolicy.js';
 import { canonicalUnit } from './services/units.js';
 import { MEAL_COUNTS, mealSchedule } from './services/mealSchedule.js';
+import { chooseEntryLanguage, loginInterfaceLanguage, setInterfaceLanguage } from './services/interfaceLanguage.js';
 import { translateRecipes } from './services/ai.js';
 import { recipeTextEntries, recipeTextSignature, recipeLocaleKey, needsRecipeTranslation, cachedRecipeTranslation, recipeForLanguage, validTranslatedTexts } from './services/recipeLocale.js';
 import { buildPlanReviewAt, localDateKey, nextPlanForReview, snoozePlanReview } from './services/planning.js';
@@ -203,11 +204,17 @@ function userNoticeSections() {
 
 function renderUserNotice(state) {
   const english = state.profile?.interfaceLanguage === 'en';
-  return `<main class="user-notice-shell"><section class="user-notice-card"><div class="notice-language"><button class="${english ? '' : 'active'}" data-notice-language="zh-CN">中文</button><button class="${english ? 'active' : ''}" data-notice-language="en">English</button></div><div class="user-notice-brand"><span class="brand-mark large">${icon('leaf')}</span><div><p class="eyebrow">BEFORE YOU START</p><h1>${english ? 'Before you enter' : '进入前，请先了解'}</h1><p>${english ? 'FreshLoop is an intelligent tool for planning ingredients and meals. Please review the boundaries around images, AI, recognition, inventory, food safety, and privacy.' : 'FreshLoop 是一个帮助规划食材与做饭的智能工具。请先了解图片、AI 生成、识图入库、库存扣减、食品安全与隐私边界。'}</p></div></div>${userNoticeSections()}<div class="user-notice-actions"><small>${english ? 'By entering, you confirm that you have read this notice. You can reopen it from Profile at any time.' : '点击进入即表示你已阅读以上说明。之后可在「档案」中再次查看。'}</small><button class="primary-button" data-action="accept-user-notice">${english ? 'I understand — enter FreshLoop' : '我已阅读，进入 FreshLoop'}</button></div></section>${state.notice ? `<div class="toast ${state.noticeFading ? 'toast-fading' : ''}" role="status">${escapeHtml(state.notice)}</div>` : ''}</main>`;
+  return `<main class="user-notice-shell"><section class="user-notice-card"><div class="notice-language" role="group" aria-label="语言 / Language" data-no-translate><span>语言 / Language</span><button type="button" lang="zh-CN" aria-pressed="${!english}" class="${english ? '' : 'active'}" data-notice-language="zh-CN">中文</button><button type="button" lang="en" aria-pressed="${english}" class="${english ? 'active' : ''}" data-notice-language="en">English</button></div><div class="user-notice-brand"><span class="brand-mark large">${icon('leaf')}</span><div><p class="eyebrow">BEFORE YOU START</p><h1>${english ? 'Before you enter' : '进入前，请先了解'}</h1><p>${english ? 'FreshLoop is an intelligent tool for planning ingredients and meals. Please review the boundaries around images, AI, recognition, inventory, food safety, and privacy.' : 'FreshLoop 是一个帮助规划食材与做饭的智能工具。请先了解图片、AI 生成、识图入库、库存扣减、食品安全与隐私边界。'}</p></div></div>${userNoticeSections()}<div class="user-notice-actions"><small>${english ? 'By entering, you confirm that you have read this notice. You can reopen it from Profile at any time.' : '点击进入即表示你已阅读以上说明。之后可在「档案」中再次查看。'}</small><button class="primary-button" data-action="accept-user-notice">${english ? 'I understand — enter FreshLoop' : '我已阅读，进入 FreshLoop'}</button></div></section>${state.notice ? `<div class="toast ${state.noticeFading ? 'toast-fading' : ''}" role="status">${escapeHtml(state.notice)}</div>` : ''}</main>`;
 }
 
 function bindUserNoticeEvents() {
-  document.querySelectorAll('[data-notice-language]').forEach((button) => button.addEventListener('click', () => store.update((next) => { next.profile.interfaceLanguage = button.dataset.noticeLanguage; })));
+  document.querySelectorAll('[data-notice-language]').forEach((button) => button.addEventListener('click', () => {
+    const language = button.dataset.noticeLanguage;
+    const scrollTop = window.scrollY;
+    store.update((next) => chooseEntryLanguage(next, language));
+    document.querySelector(`[data-notice-language="${language}"]`)?.focus({ preventScroll: true });
+    window.scrollTo({ top: scrollTop, behavior: 'instant' });
+  }));
   document.querySelector('[data-action="accept-user-notice"]')?.addEventListener('click', () => store.update((next) => { next.auth.noticeAccepted = true; }));
 }
 
@@ -547,10 +554,13 @@ function bindAuthEvents() {
       const session = await verifyPhoneOtp(store.get().auth.phone, token);
       const remote = await loadRemoteProfile(session).catch(() => null);
       store.update((next) => {
+        const language = loginInterfaceLanguage(next, remote);
         next.auth.authenticated = true; next.auth.session = session; next.auth.demoMode = !hasRemoteAuth();
         next.profile = { ...next.profile, ...(remote ? applyRemoteProfile(remote, next.auth.phone) : blankOnboardingProfile(next.auth.phone)) };
         if (remote) { next.notificationSettings = { ...next.notificationSettings, ...(remote.notification_settings || {}), channel: remote.notification_channel || 'app', smsConsent: Boolean(remote.sms_consent) }; }
         next.profile.phone = session.user?.phone || next.auth.phone; next.auth.onboardingComplete = Boolean(remote?.onboarding_completed);
+        setInterfaceLanguage(next, language);
+        delete next.auth.entryLanguage;
       });
     } catch (error) { button.disabled = false; button.textContent = '验证并继续'; notify(error.message); }
   });
@@ -982,10 +992,7 @@ function updateProfileTemperature(event) {
 
 function updateProfileLanguage(event) {
   const interfaceLanguage = event.currentTarget.value === 'en' ? 'en' : 'zh-CN';
-  store.update((next) => {
-    next.profile.interfaceLanguage = interfaceLanguage;
-    next.notificationSettings.interfaceLanguage = interfaceLanguage;
-  });
+  store.update((next) => setInterfaceLanguage(next, interfaceLanguage));
   scheduleProfileSync();
 }
 
