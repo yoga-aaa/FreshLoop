@@ -1,5 +1,7 @@
-const supabaseUrl = String(import.meta.env.VITE_SUPABASE_URL || '').replace(/\/$/, '');
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+import { translateLabel } from '../i18n.js';
+
+const supabaseUrl = String(import.meta.env?.VITE_SUPABASE_URL || '').replace(/\/$/, '');
+const supabaseAnonKey = import.meta.env?.VITE_SUPABASE_ANON_KEY || '';
 
 export function hasRemoteAuth() {
   return Boolean(supabaseUrl && supabaseAnonKey);
@@ -59,6 +61,42 @@ export async function loadRemoteProfile(session) {
   return Array.isArray(data) ? data[0] || null : data;
 }
 
+export function normalizePhone(phone) {
+  const value = String(phone || '').replace(/[\s()-]/g, '');
+  if (!/^\+[1-9]\d{7,14}$/.test(value)) throw new Error('请输入带国家/地区代码的手机号，例如 +6581234567');
+  return value;
+}
+
+export async function requestPhoneUpdate(session, phone, { demo = false } = {}) {
+  phone = normalizePhone(phone);
+  if (demo) return { demo: true };
+  if (!hasRemoteAuth() || !session?.access_token) throw new Error('请重新登录后更改手机号');
+  const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+    method: 'PUT', headers: headers(session.access_token), body: JSON.stringify({ phone })
+  });
+  await parseResponse(response, '更改手机号请求失败，请检查短信服务配置');
+  return { demo: false };
+}
+
+export async function verifyPhoneUpdate(session, phone, token, { demo = false } = {}) {
+  phone = normalizePhone(phone);
+  if (demo) {
+    if (token !== '123456') throw new Error('演示模式验证码是 123456');
+    return { ...session, user: { ...session?.user, phone } };
+  }
+  if (!hasRemoteAuth() || !session?.access_token) throw new Error('请重新登录后更改手机号');
+  const response = await fetch(`${supabaseUrl}/auth/v1/verify`, {
+    method: 'POST', headers: headers(session.access_token), body: JSON.stringify({ phone, token, type: 'phone_change' })
+  });
+  const verified = await parseResponse(response, '验证码无效或已过期');
+  const accessToken = verified.access_token || session.access_token;
+  const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, { headers: headers(accessToken) });
+  const user = await parseResponse(userResponse, '无法确认手机号，请重新登录');
+  if (user.id !== session.user?.id) throw new Error('账号身份不匹配，请重新登录');
+  if (String(user.phone || '').replace(/\D/g, '') !== phone.replace(/\D/g, '')) throw new Error('手机号尚未完成验证；如启用了双重确认，请继续输入另一条短信验证码');
+  return { ...session, ...verified, user };
+}
+
 export async function saveRemoteProfile(session, profile, notificationSettings) {
   if (!hasRemoteAuth() || !session?.user?.id) return { demo: true };
   const payload = {
@@ -74,7 +112,7 @@ export async function saveRemoteProfile(session, profile, notificationSettings) 
     taste_profile_summary: profile.tasteProfileSummary || '',
     meal_schedule: { mealsPerDay: profile.mealsPerDay, mealTimes: profile.mealTimes },
     appliance_temperatures: { fridgeC: profile.fridgeTemperatureC, freezerC: profile.freezerTemperatureC },
-    notification_settings: notificationSettings,
+    notification_settings: { ...notificationSettings, interfaceLanguage: profile.interfaceLanguage || notificationSettings.interfaceLanguage || 'zh-CN' },
     notification_channel: notificationSettings.channel || 'app',
     sms_consent: Boolean(notificationSettings.smsConsent),
     onboarding_completed: Boolean(profile.onboardingComplete)
@@ -106,7 +144,11 @@ export async function savePlannedMeal(session, plan, profile, notificationSettin
   return meal;
 }
 
-export function buildTasteProfile({ tasteTags = [], cuisineTags = [], tasteNotes = '', allergies = [], dislikes = [] }) {
+export function buildTasteProfile({ tasteTags = [], cuisineTags = [], tasteNotes = '', allergies = [], dislikes = [], interfaceLanguage = 'zh-CN' }) {
+  if (interfaceLanguage === 'en') {
+    const labels = (items) => items.map((item) => translateLabel(item)).join(', ');
+    return `Tastes: ${labels(tasteTags) || 'still exploring'}. Cuisines: ${labels(cuisineTags) || 'any'}. Allergies: ${labels(allergies) || 'none recorded'}. Exclusions: ${labels(dislikes) || 'none recorded'}.${tasteNotes ? ` Your notes: ${tasteNotes}` : ''}`;
+  }
   const tastes = tasteTags.length ? tasteTags.join('、') : '口味待探索';
   const cuisines = cuisineTags.length ? cuisineTags.join('、') : '不限地区';
   const guardrails = [...allergies.map((item) => `${item}过敏`), ...dislikes.map((item) => `不喜欢${item}`)].join('、') || '暂无额外禁忌';

@@ -1,3 +1,32 @@
+import { canonicalUnit } from './units.js';
+
+const CONSTRAINT_ALIASES = [
+  ['花生', 'peanut', 'peanuts', 'groundnut'], ['香菜', 'coriander', 'cilantro'], ['欧芹', 'parsley'],
+  ['葱', '葱花', '小葱', 'scallion', 'spring onion', 'green onion'], ['虾', '虾米', '虾酱', 'shrimp', 'prawn'],
+  ['牛奶', '乳制品', '奶制品', 'milk', 'dairy', 'cheese', 'butter', 'cream', 'yogurt', '乳酪', '黄油', '奶油', '酸奶'],
+  ['鸡蛋', '蛋类', 'egg', 'eggs'], ['大豆', '豆制品', 'soy', 'soya', 'tofu', '豆腐', '豆浆', '酱油'],
+  ['芝麻', 'sesame'], ['小麦', 'wheat'], ['鱼', 'fish', 'salmon', '三文鱼'], ['蚝', 'oyster'],
+  ['辣椒', '小米辣', 'chili', 'chilli'], ['猪肉', 'pork'], ['牛肉', 'beef']
+];
+
+function containsFoodName(text, name) {
+  if (/[\u3400-\u9fff]/.test(name)) return text.includes(name);
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\b${escaped}(?:s)?\\b`, 'i').test(text);
+}
+
+function violatesConstraint(ingredient, constraints, broad = false) {
+  const text = `${ingredient.canonicalName || ''} ${ingredient.name || ''}`.toLowerCase();
+  return constraints.some((value) => {
+    const constraint = String(value).toLowerCase().trim();
+    if (!constraint) return false;
+    // Allergy groups are conservative; dislikes match names rather than all dairy, etc.
+    const aliases = CONSTRAINT_ALIASES.find((group) => group.includes(constraint));
+    const names = aliases && (broad || aliases.length < 8) ? aliases : [constraint];
+    return names.some((name) => containsFoodName(text, name));
+  });
+}
+
 const MODE_LABELS = {
   tracked_quantity: '精细消耗',
   freshness_only: '新鲜度',
@@ -75,17 +104,15 @@ export function findInventoryItem(inventory, canonicalName) {
 export function validateRecipe(recipe, inventory, profile) {
   const errors = [];
   const inventoryByName = new Map(inventory.map((item) => [item.canonicalName, item]));
-  const allergyNames = new Set((profile.allergies || []).map((value) => value.toLowerCase()));
-  const dislikedNames = new Set((profile.dislikes || []).map((value) => value.toLowerCase()));
   for (const ingredient of recipe.ingredients || []) {
     const current = inventoryByName.get(ingredient.canonicalName);
-    if (current?.managementMode === 'tracked_quantity' && (!ingredient.unit || ingredient.unit === current.unit) && Number(ingredient.requiredAmount) > Number(current.quantity)) {
+    if (current?.managementMode === 'tracked_quantity' && (!ingredient.unit || canonicalUnit(ingredient.unit) === canonicalUnit(current.unit)) && Number(ingredient.requiredAmount) > Number(current.quantity)) {
       errors.push(`${ingredient.name}库存不足`);
     }
-    if (allergyNames.has(ingredient.canonicalName) || allergyNames.has(ingredient.name.toLowerCase())) {
+    if (violatesConstraint(ingredient, profile.allergies || [], true)) {
       errors.push(`违反过敏硬约束：${ingredient.name}`);
     }
-    if (dislikedNames.has(ingredient.canonicalName) || dislikedNames.has(ingredient.name.toLowerCase())) {
+    if (violatesConstraint(ingredient, profile.dislikes || [])) {
       errors.push(`包含用户明确不喜欢的食材：${ingredient.name}`);
     }
   }
@@ -100,7 +127,7 @@ export function buildShoppingList(recipe, inventory) {
     if (current.managementMode === 'approximate_stock') {
       return current.stockPercentage > 20 ? [] : [{ ...ingredient, status: 'need_confirm', reason: '估算库存偏低，请确认是否需要补货', available: `约 ${current.stockPercentage}%` }];
     }
-    if (ingredient.unit && ingredient.unit !== current.unit) return [{ ...ingredient, status: 'need_confirm', reason: `库存按“${current.unit}”记录，请确认是否足够`, available: `${current.quantity} ${current.unit}` }];
+    if (ingredient.unit && canonicalUnit(ingredient.unit) !== canonicalUnit(current.unit)) return [{ ...ingredient, status: 'need_confirm', reason: `库存按“${current.unit}”记录，请确认是否足够`, available: `${current.quantity} ${current.unit}` }];
     if (Number(ingredient.requiredAmount) <= Number(current.quantity)) return [];
     return [{ ...ingredient, status: 'to_buy', reason: '精细库存不足', available: `${current.quantity} ${current.unit}` }];
   });

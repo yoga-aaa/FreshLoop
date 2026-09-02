@@ -1,6 +1,7 @@
 import { getIngredientGuidance } from './ingredientKnowledge.js';
 
 export const DEMO_PROFILE = {
+  interfaceLanguage: 'zh-CN',
   name: 'Alex',
   preferences: ['辣', '中餐', '米饭'],
   tasteTags: ['辣', '鲜香'],

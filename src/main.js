@@ -1,13 +1,21 @@
 import './styles.css';
+import { applyInterfaceLanguage, observeInterfaceLanguage, translateLabel } from './i18n.js';
 import { store } from './state/store.js';
 import { analyzeInventory, cancelAllAiRequests, enrichRecipeImages, generateRecipes, getStorageGuidance } from './services/ai.js';
 import { buildTasteProfile, hasRemoteAuth, loadRemoteProfile, requestPhoneOtp, savePlannedMeal, saveRemoteProfile, sendReminderSms, verifyPhoneOtp } from './services/auth.js';
+import { normalizePhone, requestPhoneUpdate, verifyPhoneUpdate } from './services/auth.js';
 import { getIngredientGuidance, ingredientIcon } from './data/ingredientKnowledge.js';
 import { applyMealConsumption, buildShoppingList, daysUntil, expiryLabel, expiryTone, findInventoryItem, formatStock, sortInventoryByExpiry, validateRecipe } from './services/domain.js';
 import { condimentInventory, recipeSelectableInventory } from './services/recipePolicy.js';
+import { canonicalUnit } from './services/units.js';
+import { MEAL_COUNTS, mealSchedule } from './services/mealSchedule.js';
+import { translateRecipes } from './services/ai.js';
+import { recipeTextEntries, recipeTextSignature, recipeLocaleKey, needsRecipeTranslation, cachedRecipeTranslation, recipeForLanguage, validTranslatedTexts } from './services/recipeLocale.js';
 import { buildPlanReviewAt, localDateKey, nextPlanForReview, snoozePlanReview } from './services/planning.js';
 
 const app = document.querySelector('#app');
+const languageObserver = observeInterfaceLanguage(document.body);
+if (import.meta.hot) import.meta.hot.dispose(() => languageObserver.disconnect());
 const VIEW_KEYS = ['activeTab', 'recipeMode', 'selectedRecipeId', 'recipeReturnMode'];
 
 function viewSnapshot(state = store.get()) {
@@ -54,7 +62,49 @@ let planPromptQueued = false;
 const planPromptShown = new Set();
 const imageHydrationRequested = new Set();
 let profileSyncTimer = null;
+let profileNotesDraft = null;
 let recipeGenerationRun = 0;
+let recipeTranslationBusy = false;
+const recipeTranslationFailures = new Set();
+
+function visibleRecipes(state) {
+  if (state.activeTab !== 'recipe') return [];
+  const all = [...state.dailyRecommendations, ...state.recipes];
+  let visible = state.recipeMode === 'feed' ? state.dailyRecommendations : state.recipeMode === 'options' ? state.recipes.slice(-4) : [];
+  if (state.recipeMode === 'detail') visible = all.filter((recipe) => String(recipe.id) === String(state.selectedRecipeId));
+  if (state.recipeMode === 'favorites') visible = all.filter((recipe) => state.favorites.includes(recipe.id));
+  return visible.filter((recipe, index) => visible.findIndex((item) => item.id === recipe.id) === index);
+}
+
+async function queueRecipeTranslations() {
+  if (recipeTranslationBusy) return;
+  const state = store.get();
+  const language = state.profile.interfaceLanguage || 'zh-CN';
+  const owner = state.auth.session?.user?.id;
+  const pending = visibleRecipes(state).filter((recipe) => needsRecipeTranslation(recipe, language) && !cachedRecipeTranslation(recipe, language, state.recipeTranslations) && !recipeTranslationFailures.has(recipeLocaleKey(recipe, language))).slice(0, 4);
+  if (!pending.length) return;
+  recipeTranslationBusy = true;
+  try {
+    const body = await translateRecipes(pending.map((recipe) => ({ id: String(recipe.id), texts: recipeTextEntries(recipe).map((entry) => entry.text) })), language);
+    const entries = pending.map((recipe) => {
+      const texts = body.recipes?.find((item) => item.id === String(recipe.id))?.texts;
+      if (!validTranslatedTexts(recipeTextEntries(recipe).map((entry) => entry.text), texts, language)) throw new Error('Invalid translation');
+      return [recipeLocaleKey(recipe, language), { source: recipeTextSignature(recipe), texts }];
+    });
+    if (store.get().auth.session?.user?.id !== owner) return;
+    const cache = { ...(store.get().recipeTranslations || {}), ...Object.fromEntries(entries) };
+    // Keep a bounded, persisted display cache without editing the saved recipes.
+    store.set({ recipeTranslations: Object.fromEntries(Object.entries(cache).slice(-100)) }, { silent: true });
+  } catch (error) {
+    console.warn('Recipe translation:', error.message);
+    pending.forEach((recipe) => recipeTranslationFailures.add(recipeLocaleKey(recipe, language)));
+  } finally {
+    recipeTranslationBusy = false;
+    // Do not re-render another page or discard a form the user is editing.
+    const current = store.get();
+    if (current.activeTab === 'recipe' && current.recipeMode !== 'diy') render();
+  }
+}
 
 const CATEGORY_LABELS = { all: '全部', protein: '肉蛋奶及蛋白质', produce: '蔬菜水果', staple: '主食及碳水', condiment: '调味品', other: '其他食品' };
 const STORAGE_VALUES = ['冷藏', '冷冻', '常温'];
@@ -72,6 +122,7 @@ function safeSourceUrl(value = '') {
 
 function icon(name) {
   const paths = {
+    pot: '<path d="M5 10h14v7a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4v-7ZM2 12h3M19 12h3M4 7h16M10 7V5h4v2M8 3V2M16 3V2"/>',
     leaf: '<path d="M20 4C10 4 4 9 4 19c10 1 16-4 16-15Z"/><path d="M4 20c3-5 7-8 12-10"/>',
     spark: '<path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5L12 3Z"/>',
     user: '<circle cx="12" cy="8" r="3"/><path d="M5 21c.7-4 2.9-6 7-6s6.3 2 7 6"/>',
@@ -108,23 +159,60 @@ function recipeImage(recipe) {
 
 function render() {
   const state = store.get();
+  if (!state.auth?.noticeAccepted) {
+    app.innerHTML = renderUserNotice(state);
+    applyInterfaceLanguage(app, state.profile?.interfaceLanguage);
+    bindUserNoticeEvents();
+    return;
+  }
   if (!state.auth?.authenticated) {
     app.innerHTML = renderAuthPage(state);
+    applyInterfaceLanguage(app, state.profile?.interfaceLanguage);
     bindAuthEvents();
     return;
   }
   if (!state.auth.onboardingComplete) {
     app.innerHTML = renderOnboarding(state);
+    applyInterfaceLanguage(app, state.profile?.interfaceLanguage);
     bindOnboardingEvents();
     return;
   }
   const views = { inventory: renderInventory, recipe: renderRecipe, shopping: renderShopping, profile: renderProfileV4 };
-  app.innerHTML = `<div class="app-shell"><header class="topbar"><button class="brand-button" data-tab="inventory" aria-label="返回食材库"><span class="brand-mark">${icon('leaf')}</span><span><small>FRESHLOOP</small><strong>把食材用在刚好的时候</strong></span></button><div class="header-actions"><button class="header-plan" data-tab="recipe">${icon('spark')} 看看今日推荐</button><button class="icon-button" data-action="show-reminder" aria-label="查看通知">${icon('bell')}<span class="notification-dot"></span></button></div></header><main class="content">${views[state.activeTab]?.(state) || renderInventory(state)}</main>${renderNav(state.activeTab)}${state.notice ? `<div class="toast" role="status">${escapeHtml(state.notice)}</div>` : ''}</div>`;
+  app.innerHTML = `<div class="app-shell"><header class="topbar"><button class="brand-button" data-tab="inventory" aria-label="返回食材库"><span class="brand-mark">${icon('leaf')}</span><span><small>FRESHLOOP</small><strong>把食材用在刚好的时候</strong></span></button><div class="header-actions"><button class="header-plan" data-tab="recipe">${icon('spark')} 看看今日推荐</button><button class="icon-button" data-action="show-reminder" aria-label="查看通知">${icon('bell')}<span class="notification-dot"></span></button></div></header><main class="content">${views[state.activeTab]?.(state) || renderInventory(state)}</main>${renderNav(state.activeTab)}${state.notice ? `<div class="toast ${state.noticeFading ? 'toast-fading' : ''}" role="status">${escapeHtml(state.notice)}</div>` : ''}</div>`;
+  if (state.activeTab === 'profile') injectProfileLanguageSetting(state);
   polishInventorySurface();
+  applyInterfaceLanguage(app, state.profile?.interfaceLanguage);
   bindEvents();
   queueMissingRecipeImages();
+  queueRecipeTranslations();
   queueExpiredPrompt();
   queueDuePlanReview();
+}
+
+function injectProfileLanguageSetting(state) {
+
+  const notificationHeading = app.querySelector('.profile-layout .profile-card:nth-child(2) > .section-title');
+  if (!notificationHeading) return;
+  notificationHeading.insertAdjacentHTML('afterend', `<label class="language-setting"><span><strong>界面语言</strong><small>切换界面和菜谱语言；已有菜谱翻译后缓存，自填偏好保留原文。</small></span><select data-profile-language><option value="zh-CN" ${state.profile.interfaceLanguage !== 'en' ? 'selected' : ''}>中文（简体）</option><option value="en" ${state.profile.interfaceLanguage === 'en' ? 'selected' : ''}>English</option></select></label>`);
+}
+
+function userNoticeSections() {
+  if (store.get().profile?.interfaceLanguage === 'en') return `<div class="user-notice-grid"><section><span>01</span><h2>Images and presentation</h2><p>Recipe images may come from open libraries, public web pages, third-party recipe pages, or generated references. They help explain appearance but do not promise the same result. Before commercial or public release, verify every licence, replace unlicensed material, and retain any attribution required by its specific terms.</p></section><section><span>02</span><h2>AI generation and retrieval</h2><p>Recipes, recognition, classification, and storage guidance are produced with AI and retrieved references. They are not individually reviewed by a person and can still miss items, mistranslate names, mismatch images, or suggest unsuitable amounts and steps. Review everything before use.</p></section><section><span>03</span><h2>Recognition and inventory</h2><p>Uploaded food photos and receipts create a draft review list only. You can edit the name, amount, unit, package state, storage method, and date. Nothing enters inventory until you confirm it, and unclear items should never be invented from context.</p></section><section><span>04</span><h2>Meal plans and stock usage</h2><p>“Cook today” adds a plan and may update the shopping list, but it does not immediately deduct stock. At your chosen time, FreshLoop asks whether you actually cooked it and lets you review real usage. Browsing, saving, or opening a recipe never changes inventory.</p></section><section><span>05</span><h2>Storage and food safety</h2><p>Dates are quality-planning reminders based on food type, package state, appliance temperatures, and reference ranges—not safety guarantees. Package labels, an uninterrupted cold chain, actual temperature, smell, colour, texture, and local food-safety guidance take priority.</p></section><section><span>06</span><h2>Allergies and health boundary</h2><p>Allergies and explicit exclusions are treated as hard constraints, but models can still make mistakes. Recheck package ingredients and cross-contamination risks before buying or cooking. Traditional food-culture descriptions are not medical, nutrition, or health advice.</p></section><section><span>07</span><h2>Account, reminders, and privacy</h2><p>Your phone number is used only for sign-in, profile sync, and reminders you enable—not marketing. Food and receipt photos are sent to the configured vision model, so hide names, addresses, order numbers, payment details, and unrelated sensitive information first.</p></section><section><span>08</span><h2>You stay in control</h2><p>You can edit or delete ingredients, change appliance temperatures, disable reminders, cancel a meal plan, and update preferences at any time. Important actions keep a human confirmation step. If a result looks unreliable, cancel it, retake the image, or enter it manually.</p></section></div>`;
+  return `<div class="user-notice-grid"><section><span>01</span><h2>图片来源与展示</h2><p>菜谱参考图可能来自开放图库、公开网页、第三方菜谱页面或系统生成，用于帮助理解菜品外观，不代表实际烹饪结果。系统会在内部保留可用的来源信息，但主页不重复展示。正式商用或公开传播前，应逐张核对授权范围，替换为自有或已获授权素材，并按具体许可保留必要署名。</p></section><section><span>02</span><h2>AI 生成与资料检索</h2><p>菜谱、食材识别、分类和储存建议由 AI 结合库存、口味画像与资料检索辅助生成，并非人工逐项审核，仍可能出现漏识别、名称误译、图片不匹配、用量或步骤不合理。请在使用前核对，不能把生成内容视为唯一依据。</p></section><section><span>03</span><h2>食材识别与入库</h2><p>上传的食材合照或小票只生成待确认清单。名称、数量、单位、包装状态、储存方式与日期都可以修改；只有点击确认后才写入库存。模糊、遮挡或无法从图片直接证明的项目不应被自动补全。</p></section><section><span>04</span><h2>菜谱计划与库存消耗</h2><p>“今天想做”只会加入计划并影响采购清单，不会立刻扣减库存。到设定时间后，系统会再次询问是否实际做了，并由你核对真实用量；确认后才计算剩余库存。收藏、浏览或打开菜谱都不会改变库存。</p></section><section><span>05</span><h2>储存期限与食品安全</h2><p>页面日期是基于食材类型、包装状态、冷藏/冷冻温度与资料范围给出的最佳品质提醒，不是安全保证。包装标注、连续冷链、实际温度、气味、颜色、质地和当地食品安全建议优先；来源不明、温控中断或状态可疑时请勿食用。</p></section><section><span>06</span><h2>过敏、忌口与健康边界</h2><p>系统会把过敏和明确忌口作为硬约束再次检查，但模型仍可能犯错，购买和烹饪前请自行复核包装配料及交叉污染风险。“寒热”等内容仅是传统饮食文化资料，不构成医疗、营养或健康建议。</p></section><section><span>07</span><h2>账号、提醒与隐私</h2><p>手机号仅用于登录、同步档案和你主动开启的短信提醒，不用于营销。食材照片和小票会发送给已配置的视觉模型进行识别，请先遮挡姓名、地址、订单号、银行卡或其他与食材管理无关的敏感信息。</p></section><section><span>08</span><h2>你的控制权</h2><p>你可以随时编辑或删除食材、调整冰箱温度、关闭通知、取消今日计划，并在档案中修改口味与提醒设置。重要决定都会保留人工确认步骤；如果结果不可靠，请取消操作、重新拍摄或手动录入。</p></section></div>`;
+}
+
+function renderUserNotice(state) {
+  const english = state.profile?.interfaceLanguage === 'en';
+  return `<main class="user-notice-shell"><section class="user-notice-card"><div class="notice-language"><button class="${english ? '' : 'active'}" data-notice-language="zh-CN">中文</button><button class="${english ? 'active' : ''}" data-notice-language="en">English</button></div><div class="user-notice-brand"><span class="brand-mark large">${icon('leaf')}</span><div><p class="eyebrow">BEFORE YOU START</p><h1>${english ? 'Before you enter' : '进入前，请先了解'}</h1><p>${english ? 'FreshLoop is an intelligent tool for planning ingredients and meals. Please review the boundaries around images, AI, recognition, inventory, food safety, and privacy.' : 'FreshLoop 是一个帮助规划食材与做饭的智能工具。请先了解图片、AI 生成、识图入库、库存扣减、食品安全与隐私边界。'}</p></div></div>${userNoticeSections()}<div class="user-notice-actions"><small>${english ? 'By entering, you confirm that you have read this notice. You can reopen it from Profile at any time.' : '点击进入即表示你已阅读以上说明。之后可在「档案」中再次查看。'}</small><button class="primary-button" data-action="accept-user-notice">${english ? 'I understand — enter FreshLoop' : '我已阅读，进入 FreshLoop'}</button></div></section>${state.notice ? `<div class="toast ${state.noticeFading ? 'toast-fading' : ''}" role="status">${escapeHtml(state.notice)}</div>` : ''}</main>`;
+}
+
+function bindUserNoticeEvents() {
+  document.querySelectorAll('[data-notice-language]').forEach((button) => button.addEventListener('click', () => store.update((next) => { next.profile.interfaceLanguage = button.dataset.noticeLanguage; })));
+  document.querySelector('[data-action="accept-user-notice"]')?.addEventListener('click', () => store.update((next) => { next.auth.noticeAccepted = true; }));
+}
+
+function openUserNotice() {
+  createModal(`<div class="modal-heading"><p class="eyebrow">USER NOTICE</p><h2>用户须知</h2><p>图片、AI 生成、食品储存与隐私说明。</p></div>${userNoticeSections()}`, 'wide');
 }
 
 function queueMissingRecipeImages() {
@@ -152,12 +240,12 @@ function polishInventorySurface() {
 
 function renderAuthPage(state) {
   const stage = state.auth?.stage || 'phone';
-  return `<main class="auth-shell"><section class="auth-story"><span class="brand-mark large">${icon('leaf')}</span><p class="eyebrow">FRESHLOOP</p><h1>把食材用在<br>刚好的时候</h1><p>记住你的库存、口味和生活节奏，把每一次推荐变成真正适合你的那一餐。</p><div class="auth-points"><span>按食材与温度检索储存建议</span><span>菜谱会避开过敏与明确忌口</span><span>采购、提醒与餐后记录连在一起</span></div></section><section class="auth-card"><p class="eyebrow">${stage === 'otp' ? 'VERIFY PHONE' : 'SIGN IN OR REGISTER'}</p><h2>${stage === 'otp' ? '输入短信验证码' : '用手机号开始'}</h2><p>${stage === 'otp' ? `验证码已发送至 ${escapeHtml(state.auth.phone)}。首次登录后会用两分钟建立饮食画像。` : '注册与登录使用同一入口。手机号验证后，你的档案可以安全同步到后端。'}</p>${stage === 'otp' ? `<form data-form="verify-otp" class="auth-form"><label>6 位验证码<input name="token" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456" required></label><button class="primary-button" type="submit">验证并继续</button></form><button class="text-button auth-back" data-action="change-phone">换一个手机号</button>${!hasRemoteAuth() ? '<div class="demo-code">本地演示模式：验证码 <strong>123456</strong></div>' : ''}` : `<form data-form="phone-auth" class="auth-form"><label>手机号<input name="phone" type="tel" autocomplete="tel" placeholder="例如 +65 8123 4567" required></label><small>请包含国家/地区代码；验证短信可能产生运营商费用。</small><button class="primary-button" type="submit">获取短信验证码</button></form>`}<div class="auth-divider"><span>或</span></div><button class="secondary-button full-width" data-action="demo-enter">直接体验演示</button><small class="auth-legal">继续即表示你同意仅将手机号用于登录与已授权提醒；短信提醒可随时关闭。</small></section>${state.notice ? `<div class="toast" role="status">${escapeHtml(state.notice)}</div>` : ''}</main>`;
+  return `<main class="auth-shell"><section class="auth-story"><span class="brand-mark large">${icon('leaf')}</span><p class="eyebrow">FRESHLOOP</p><h1>把食材用在<br>刚好的时候</h1><p>记住你的库存、口味和生活节奏，把每一次推荐变成真正适合你的那一餐。</p><div class="auth-points"><span>按食材与温度检索储存建议</span><span>菜谱会避开过敏与明确忌口</span><span>采购、提醒与餐后记录连在一起</span></div></section><section class="auth-card"><p class="eyebrow">${stage === 'otp' ? 'VERIFY PHONE' : 'SIGN IN OR REGISTER'}</p><h2>${stage === 'otp' ? '输入短信验证码' : '用手机号开始'}</h2><p>${stage === 'otp' ? `验证码已发送至 ${escapeHtml(state.auth.phone)}。首次登录后会用两分钟建立饮食画像。` : '注册与登录使用同一入口。手机号验证后，你的档案可以安全同步到后端。'}</p>${stage === 'otp' ? `<form data-form="verify-otp" class="auth-form"><label>6 位验证码<input name="token" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456" required></label><button class="primary-button" type="submit">验证并继续</button></form><button class="text-button auth-back" data-action="change-phone">换一个手机号</button>${!hasRemoteAuth() ? '<div class="demo-code">本地演示模式：验证码 <strong>123456</strong></div>' : ''}` : `<form data-form="phone-auth" class="auth-form"><label>手机号<input name="phone" type="tel" autocomplete="tel" placeholder="例如 +65 8123 4567" required></label><small>请包含国家/地区代码；验证短信可能产生运营商费用。</small><button class="primary-button" type="submit">获取短信验证码</button></form>`}<div class="auth-divider"><span>或</span></div><button class="secondary-button full-width" data-action="demo-enter">直接体验演示</button><small class="auth-legal">继续即表示你同意仅将手机号用于登录与已授权提醒；短信提醒可随时关闭。</small></section>${state.notice ? `<div class="toast ${state.noticeFading ? 'toast-fading' : ''}" role="status">${escapeHtml(state.notice)}</div>` : ''}</main>`;
 }
 
 function renderOnboarding(state) {
   const profile = state.profile;
-  return `<main class="onboarding-shell"><header class="onboarding-brand"><span class="brand-mark">${icon('leaf')}</span><span><small>FRESHLOOP</small><strong>先认识你的餐桌</strong></span><em>约 2 分钟 · 之后都能在档案修改</em></header><form class="onboarding-card" data-form="onboarding"><div class="onboarding-heading"><p class="eyebrow">FIRST SETUP</p><h1>让推荐真正适合你</h1><p>过敏与明确忌口是硬约束；口味偏好会影响调料种类、用量和地区做法。</p></div><section class="onboarding-section required-section"><div><span class="step-number">1</span><h2>必须先知道的饮食信息</h2></div><div class="onboarding-grid two"><label>怎么称呼你<input name="name" value="${escapeHtml(profile.name || '')}" placeholder="例如：小瑜、Alex" required></label><label>过敏食材<input name="allergies" value="${escapeHtml((profile.allergies || []).join('、'))}" placeholder="例如：花生、虾；没有请填“无”" required></label><label>明确不喜欢或忌口<input name="dislikes" value="${escapeHtml((profile.dislikes || []).join('、'))}" placeholder="例如：香菜、葱；没有请填“无”" required></label><label>其他补充<input name="tasteNotes" value="${escapeHtml(profile.tasteNotes || '')}" placeholder="例如：喜欢微辣、少油、偏爱有汤汁"></label></div><fieldset><legend>喜欢的味道（可多选）</legend><div class="choice-cloud">${TASTE_OPTIONS.map((item) => `<label><input type="checkbox" name="tasteTags" value="${item}" ${(profile.tasteTags || []).includes(item) ? 'checked' : ''}><span>${item}</span></label>`).join('')}</div></fieldset><fieldset><legend>常喜欢的地区风味（可多选）</legend><div class="choice-cloud">${CUISINE_OPTIONS.map((item) => `<label><input type="checkbox" name="cuisineTags" value="${item}" ${(profile.cuisineTags || []).includes(item) ? 'checked' : ''}><span>${item}</span></label>`).join('')}</div></fieldset></section><section class="onboarding-section"><div><span class="step-number">2</span><h2>冰箱温度与生活节奏</h2><small>可以直接采用默认值；提醒也可以稍后再填。</small></div><div class="temperature-setup"><label>冷藏温度<input name="fridgeTemperatureC" type="number" min="0" max="10" step="0.5" value="${profile.fridgeTemperatureC ?? 4}"><span>°C</span><small>常用参考：4°C 或以下</small></label><label>冷冻温度<input name="freezerTemperatureC" type="number" min="-30" max="0" step="1" value="${profile.freezerTemperatureC ?? -18}"><span>°C</span><small>常用参考：−18°C 或以下</small></label></div><p class="temperature-note">请填写冰箱显示或温度计读数。设定值不等于实际温度；储存建议会将这里的温度作为检索条件。</p><div class="onboarding-grid three"><label>每天几顿<select name="mealsPerDay">${[1,2,3,4,5].map((n) => `<option value="${n}" ${Number(profile.mealsPerDay || 3) === n ? 'selected' : ''}>${n} 顿</option>`).join('')}</select></label><label>第一顿<input type="time" name="mealTime1" value="${profile.mealTimes?.[0] || '08:00'}"></label><label>第二顿<input type="time" name="mealTime2" value="${profile.mealTimes?.[1] || '12:30'}"></label><label>第三顿<input type="time" name="mealTime3" value="${profile.mealTimes?.[2] || '19:00'}"></label><label>每日食谱提醒<input type="time" name="planningTime" value="${state.notificationSettings.planningTime}"></label><label>“今天想做”确认<input type="time" name="planConfirmationTime" value="${state.notificationSettings.planConfirmationTime || '21:30'}"></label></div><div class="reminder-consent"><label><input type="checkbox" name="enableReminders" checked> 开启应用内/电脑提醒</label><label><input type="checkbox" name="smsConsent"> 同意将提醒同时发送到已验证手机号</label></div></section><div class="onboarding-actions"><button class="secondary-button" type="submit" data-skip-reminders="true">提醒稍后设置</button><button class="primary-button" type="submit">保存并进入 FreshLoop</button></div></form>${state.notice ? `<div class="toast" role="status">${escapeHtml(state.notice)}</div>` : ''}</main>`;
+  return `<main class="onboarding-shell"><header class="onboarding-brand"><span class="brand-mark">${icon('leaf')}</span><span><small>FRESHLOOP</small><strong>先认识你的餐桌</strong></span><em>约 2 分钟 · 之后都能在档案修改</em></header><form class="onboarding-card" data-form="onboarding"><div class="onboarding-heading"><p class="eyebrow">FIRST SETUP</p><h1>让推荐真正适合你</h1><p>过敏与明确忌口是硬约束；口味偏好会影响调料种类、用量和地区做法。</p></div><section class="onboarding-section required-section"><div><span class="step-number">1</span><h2>必须先知道的饮食信息</h2></div><div class="onboarding-grid two"><label>怎么称呼你<input name="name" value="${escapeHtml(profile.name || '')}" placeholder="例如：小瑜、Alex" required></label><label>过敏食材<input name="allergies" value="${escapeHtml((profile.allergies || []).join('、'))}" placeholder="例如：花生、虾；没有请填“无”" required></label><label>明确不喜欢或忌口<input name="dislikes" value="${escapeHtml((profile.dislikes || []).join('、'))}" placeholder="例如：香菜、葱；没有请填“无”" required></label><label>其他补充<input name="tasteNotes" value="${escapeHtml(profile.tasteNotes || '')}" placeholder="例如：喜欢微辣、少油、偏爱有汤汁"></label></div><fieldset><legend>喜欢的味道（可多选）</legend><div class="choice-cloud">${TASTE_OPTIONS.map((item) => `<label><input type="checkbox" name="tasteTags" value="${item}" ${(profile.tasteTags || []).includes(item) ? 'checked' : ''}><span>${item}</span></label>`).join('')}</div></fieldset><fieldset><legend>常喜欢的地区风味（可多选）</legend><div class="choice-cloud">${CUISINE_OPTIONS.map((item) => `<label><input type="checkbox" name="cuisineTags" value="${item}" ${(profile.cuisineTags || []).includes(item) ? 'checked' : ''}><span>${item}</span></label>`).join('')}</div></fieldset></section><section class="onboarding-section"><div><span class="step-number">2</span><h2>冰箱温度与生活节奏</h2><small>可以直接采用默认值；提醒也可以稍后再填。</small></div><div class="temperature-setup"><label>冷藏温度<input name="fridgeTemperatureC" type="number" min="0" max="10" step="0.5" value="${profile.fridgeTemperatureC ?? 4}"><span>°C</span><small>常用参考：4°C 或以下</small></label><label>冷冻温度<input name="freezerTemperatureC" type="number" min="-30" max="0" step="1" value="${profile.freezerTemperatureC ?? -18}"><span>°C</span><small>常用参考：−18°C 或以下</small></label></div><p class="temperature-note">请填写冰箱显示或温度计读数。设定值不等于实际温度；储存建议会将这里的温度作为检索条件。</p><div class="onboarding-grid three"><label>每天几顿<select name="mealsPerDay">${MEAL_COUNTS.map((n) => `<option value="${n}" ${Number(profile.mealsPerDay || 3) === n ? 'selected' : ''}>${n} 顿</option>`).join('')}</select></label>${MEAL_COUNTS.map((n) => `<label data-onboarding-meal="${n}" ${n > Number(profile.mealsPerDay || 3) ? 'hidden' : ''}>第 ${n} 顿<input type="time" name="mealTime${n}" value="${mealSchedule(6, profile.mealTimes)[n - 1]}" ${n > Number(profile.mealsPerDay || 3) ? 'disabled' : ''} required></label>`).join('')}<label>每日食谱提醒<input type="time" name="planningTime" value="${state.notificationSettings.planningTime}"></label><label>“今天想做”确认<input type="time" name="planConfirmationTime" value="${state.notificationSettings.planConfirmationTime || '21:30'}"></label></div><div class="reminder-consent"><label><input type="checkbox" name="enableReminders" checked> 开启应用内/电脑提醒</label><label><input type="checkbox" name="smsConsent"> 同意将提醒同时发送到已验证手机号</label></div></section><div class="onboarding-actions"><button class="secondary-button" type="submit" data-skip-reminders="true">提醒稍后设置</button><button class="primary-button" type="submit">保存并进入 FreshLoop</button></div></form>${state.notice ? `<div class="toast ${state.noticeFading ? 'toast-fading' : ''}" role="status">${escapeHtml(state.notice)}</div>` : ''}</main>`;
 }
 
 function renderNav(activeTab) {
@@ -225,6 +313,15 @@ function renderFoodRow(item, manageMode) {
 }
 
 function renderRecipe(state) {
+  const language = state.profile.interfaceLanguage || 'zh-CN';
+  const missing = visibleRecipes(state).filter((recipe) => needsRecipeTranslation(recipe, language) && !cachedRecipeTranslation(recipe, language, state.recipeTranslations));
+  const failed = missing.some((recipe) => recipeTranslationFailures.has(recipeLocaleKey(recipe, language)));
+  const english = language === 'en';
+  const status = missing.length ? `<div class="recipe-translation-status" role="status">${failed ? (english ? 'Recipe translation could not finish. The original is preserved.' : '菜谱翻译暂未完成，已保留原文。') : (english ? 'Translating recipe names, descriptions and steps…' : '正在翻译菜名、介绍和做法…')}${failed ? ` <button class="secondary-button" type="button" data-action="retry-recipe-translation">${english ? 'Retry translation' : '重试翻译'}</button>` : ''}</div>` : '';
+  return status + renderRecipeContent(state);
+}
+
+function renderRecipeContent(state) {
   if (state.recipeMode === 'diy') return renderDiyPlanner(state);
   if (state.recipeMode === 'options') return renderRecipeOptions(state);
   if (state.recipeMode === 'detail') return renderRecipeDetailPage(state);
@@ -233,15 +330,15 @@ function renderRecipe(state) {
 }
 
 function recipePageHeader(title, copy, left = '', right = '') {
-  return `<section class="recipe-heading"><div class="recipe-heading-side">${left}</div><div><p class="eyebrow">TODAY'S TABLE</p><h1>${title}</h1><p>${copy}</p></div><div class="recipe-heading-side right">${right}</div></section>`;
+  return `<section class="recipe-heading"><div class="recipe-heading-side">${left}</div><div><p class="eyebrow">TODAY'S TABLE</p><h1>${escapeHtml(title)}</h1><p>${escapeHtml(copy)}</p></div><div class="recipe-heading-side right">${right}</div></section>`;
 }
 
 function renderRecommendationFeed(state) {
   const cards = state.dailyRecommendations;
   const header = recipePageHeader('今日推荐', '从现有库存出发，也允许一点新鲜灵感；过敏与明确忌口始终是硬约束。', `<button class="round-label-button" data-action="open-diy">${icon('wand')}<span>此刻想法</span></button>`, `<button class="round-label-button" data-action="open-favorites">${icon('star')}<span>收藏夹</span></button>`);
   const error = state.dailyRecommendationError ? `<div class="ai-connection-panel"><div><strong>没有用模板冒充 AI 结果</strong><p>${escapeHtml(state.dailyRecommendationError)}</p><small>配置服务后点击“重新连接并生成”，才会出现新菜谱。</small></div><button class="primary-button" data-action="refresh-feed">重新连接并生成</button></div>` : '';
-  const content = cards.length ? `<div class="rag-status">${icon('spark')} DeepSeek 动态生成 · 结合本次库存抽样、口味画像与 ${cards[0]?.retrievalContext?.length || 0} 条烹饪知识卡</div><section class="recipe-feed">${cards.map((recipe, index) => renderFeedCard(recipe, state, index)).join('')}</section>` : state.isGenerating ? `<div class="feed-loading"><span class="spinner"></span><strong>正在检索资料并现场生成</strong><small>通常需要 15–40 秒；超过 65 秒会自动停止，不会无限等待。</small><button class="secondary-button" data-action="cancel-generation">取消本次生成</button></div>` : '';
-  return `${header}<div class="feed-toolbar"><span>为 ${escapeHtml(state.profile.name)} 生成 · ${new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })}</span><button data-action="refresh-feed">${icon('refresh')} ${state.isGenerating ? '更新中…' : '换一组'}</button></div>${error}${content}`;
+  const content = cards.length ? `<div class="rag-status">${icon('spark')} 动态生成 · 结合本次库存抽样、口味画像与 ${cards[0]?.retrievalContext?.length || 0} 条烹饪知识卡</div><section class="recipe-feed">${cards.map((recipe, index) => renderFeedCard(recipe, state, index)).join('')}</section>` : state.isGenerating ? `<div class="feed-loading"><span class="spinner"></span><strong>正在检索资料并现场生成</strong><small>通常需要 15–40 秒；超过 65 秒会自动停止，不会无限等待。</small><button class="secondary-button" data-action="cancel-generation">取消本次生成</button></div>` : '';
+  return `${header}<div class="feed-toolbar"><span>为 ${escapeHtml(state.profile.name)} 生成 · ${new Date().toLocaleDateString(state.profile.interfaceLanguage === 'en' ? 'en' : 'zh-CN', { month: 'long', day: 'numeric' })}</span><button data-action="refresh-feed">${icon('refresh')} ${state.isGenerating ? '更新中…' : '换一组'}</button></div>${error}${content}`;
 }
 
 function planStatusText(plan) {
@@ -251,11 +348,12 @@ function planStatusText(plan) {
 }
 
 function renderFeedCard(recipe, state, index) {
+  recipe = recipeForLanguage(recipe, state.profile.interfaceLanguage, state.recipeTranslations);
   const missing = buildShoppingList(recipe, state.inventory);
   const favorite = state.favorites.includes(recipe.id);
   const planned = state.plannedMeals.find((item) => String(item.recipeId) === String(recipe.id) && ['planned', 'awaiting_review'].includes(item.status));
   const used = recipePreviewIngredients(recipe, state, 4);
-  return `<article class="feed-card ${index === 0 ? 'feature' : ''}" data-recipe-card="${recipe.id}" tabindex="0" aria-label="打开${escapeHtml(recipe.recipeName)}完整做法"><div class="recipe-visual"><img src="${recipeImage(recipe)}" alt="${escapeHtml(recipe.recipeName)}成品参考图" referrerpolicy="no-referrer">${recipe.image?.sourceUrl ? `<a class="image-attribution" href="${safeSourceUrl(recipe.image.sourceUrl)}" target="_blank" rel="noreferrer" data-card-control>图片：${escapeHtml(recipe.image.provider || recipe.image.license || '开放图库')}</a>` : ''}<small>${formatPrepTime(recipe.estimatedPrepMinutes)} · ${recipe.servings} 人份</small></div><div class="feed-card-copy"><div class="feed-card-top"><span>${escapeHtml(recipe.planLabel || (index < 2 ? '尽量用现有库存' : '少量补齐新食材'))}</span><button class="star-button ${favorite ? 'saved' : ''}" data-action="favorite-recipe" data-id="${recipe.id}" aria-label="${favorite ? '取消收藏' : '收藏'}">${icon('star')}</button></div><h2>${escapeHtml(recipe.recipeName)}</h2><p>${escapeHtml(recipe.reason)}</p><div class="ingredient-preview">${used.map((item) => `<span>${ingredientIcon(item.name)} ${escapeHtml(item.name)}</span>`).join('')}</div><div class="feed-meta"><span>${missing.length ? `${missing.length} 项需要采购或确认` : '家中食材已够用'} · 核心食材 ${recipe.coreIngredientCount ?? '≤3'} 种</span></div>${planned ? `<small class="plan-status">${escapeHtml(planStatusText(planned))}</small>` : ''}<div class="feed-actions"><button class="secondary-button" data-action="favorite-recipe" data-id="${recipe.id}">${icon('star')} ${favorite ? '已收藏' : '先收藏'}</button><button class="primary-button ${planned ? 'planned-button' : ''}" data-action="want-recipe" data-id="${recipe.id}">${icon('leaf')} ${planned ? '取消今日计划' : '今天想做'}</button></div></div></article>`;
+  return `<article class="feed-card ${index === 0 ? 'feature' : ''}" data-recipe-card="${recipe.id}" tabindex="0" aria-label="打开${escapeHtml(recipe.recipeName)}完整做法"><div class="recipe-visual"><img src="${recipeImage(recipe)}" alt="${escapeHtml(recipe.recipeName)}成品参考图" referrerpolicy="no-referrer"><small>${formatPrepTime(recipe.estimatedPrepMinutes)} · ${recipe.servings} 人份</small></div><div class="feed-card-copy"><div class="feed-card-top"><span>${escapeHtml(recipe.planLabel || (index < 2 ? '尽量用现有库存' : '少量补齐新食材'))}</span><button class="star-button ${favorite ? 'saved' : ''}" data-action="favorite-recipe" data-id="${recipe.id}" aria-label="${favorite ? '取消收藏' : '收藏'}">${icon('star')}</button></div><h2>${escapeHtml(recipe.recipeName)}</h2><p>${escapeHtml(recipe.reason)}</p><div class="ingredient-preview">${used.map((item) => `<span>${ingredientIcon(item.name)} ${escapeHtml(item.name)}</span>`).join('')}</div><div class="feed-meta"><span>${missing.length ? `${missing.length} 项需要采购或确认` : '家中食材已够用'} · 核心食材 ${recipe.coreIngredientCount ?? '≤3'} 种</span></div>${planned ? `<small class="plan-status">${escapeHtml(planStatusText(planned))}</small>` : ''}<div class="feed-actions"><button class="secondary-button" data-action="favorite-recipe" data-id="${recipe.id}">${icon('star')} ${favorite ? '已收藏' : '先收藏'}</button><button class="primary-button ${planned ? 'planned-button' : ''}" data-action="want-recipe" data-id="${recipe.id}">${icon('pot')} ${planned ? '取消今日计划' : '今天想做'}</button></div></div></article>`;
 }
 
 function recipePreviewIngredients(recipe, state, limit = 6) {
@@ -309,10 +407,11 @@ function renderRecipeOptions(state) {
 }
 
 function renderOptionCard(recipe, state) {
+  recipe = recipeForLanguage(recipe, state.profile.interfaceLanguage, state.recipeTranslations);
   const missing = buildShoppingList(recipe, state.inventory);
   const favorite = state.favorites.includes(recipe.id);
   const planned = state.plannedMeals.find((item) => String(item.recipeId) === String(recipe.id) && ['planned', 'awaiting_review'].includes(item.status));
-  return `<article class="option-card" data-recipe-card="${recipe.id}" tabindex="0" aria-label="打开${escapeHtml(recipe.recipeName)}完整做法"><div class="option-title"><img src="${recipeImage(recipe)}" alt="${escapeHtml(recipe.recipeName)}" referrerpolicy="no-referrer"><div><small>${escapeHtml(recipe.planLabel || '按库存与想法生成')} · ${formatPrepTime(recipe.estimatedPrepMinutes)} · ${recipe.servings} 人份</small><h2>${escapeHtml(recipe.recipeName)}</h2></div><button class="star-button ${favorite ? 'saved' : ''}" data-action="favorite-recipe" data-id="${recipe.id}">${icon('star')}</button></div><p>${escapeHtml(recipe.reason)}</p><div class="mini-ingredients">${recipePreviewIngredients(recipe, state).map((item) => `<span class="${item.userIntentRequired ? 'intent-required' : ''}">${escapeHtml(item.name)}</span>`).join('')}</div><small class="option-gap">${missing.length ? `需要补充或确认 ${missing.length} 项` : '现有库存可以完成'}</small>${planned ? `<small class="plan-status">${escapeHtml(planStatusText(planned))}</small>` : ''}<div class="feed-actions"><button class="primary-button ${planned ? 'planned-button' : ''}" data-action="want-recipe" data-id="${recipe.id}">${planned ? '取消今日计划' : '今天想做'}</button></div></article>`;
+  return `<article class="option-card" data-recipe-card="${recipe.id}" tabindex="0" aria-label="打开${escapeHtml(recipe.recipeName)}完整做法"><div class="option-title"><img src="${recipeImage(recipe)}" alt="${escapeHtml(recipe.recipeName)}" referrerpolicy="no-referrer"><div><small>${escapeHtml(recipe.planLabel || '按库存与想法生成')} · ${formatPrepTime(recipe.estimatedPrepMinutes)} · ${recipe.servings} 人份</small><h2>${escapeHtml(recipe.recipeName)}</h2></div><button class="star-button ${favorite ? 'saved' : ''}" data-action="favorite-recipe" data-id="${recipe.id}">${icon('star')}</button></div><p>${escapeHtml(recipe.reason)}</p><div class="mini-ingredients">${recipePreviewIngredients(recipe, state).map((item) => `<span class="${item.userIntentRequired ? 'intent-required' : ''}">${escapeHtml(item.name)}</span>`).join('')}</div><small class="option-gap">${missing.length ? `需要补充或确认 ${missing.length} 项` : '现有库存可以完成'}</small>${planned ? `<small class="plan-status">${escapeHtml(planStatusText(planned))}</small>` : ''}<div class="feed-actions"><button class="primary-button ${planned ? 'planned-button' : ''}" data-action="want-recipe" data-id="${recipe.id}">${icon('pot')} ${planned ? '取消今日计划' : '今天想做'}</button></div></article>`;
 }
 
 function findRecipe(state, id) {
@@ -320,7 +419,7 @@ function findRecipe(state, id) {
 }
 
 function renderRecipeDetailPage(state) {
-  const recipe = findRecipe(state, state.selectedRecipeId);
+  const recipe = recipeForLanguage(findRecipe(state, state.selectedRecipeId), state.profile.interfaceLanguage, state.recipeTranslations);
   if (!recipe) return renderRecommendationFeed(state);
   const errors = validateRecipe(recipe, state.inventory, state.profile);
   const missing = buildShoppingList(recipe, state.inventory);
@@ -337,7 +436,7 @@ function renderRecipeDetailPage(state) {
     ${errors.length ? `<div class="alert danger-alert">${errors.map(escapeHtml).join('；')}</div>` : ''}
     <div class="recipe-detail-grid"><section><h3>食材与调味</h3><div class="recipe-ingredients">${recipe.ingredients.map((item) => { const current = findInventoryItem(state.inventory, item.canonicalName); return `<div><span>${escapeHtml(item.name)}${!current ? '<em>需购买</em>' : ''}</span><strong>${escapeHtml(String(item.requiredAmount))} ${escapeHtml(item.unit)}</strong></div>`; }).join('')}</div><h3>处理准备</h3><ul class="detail-list">${(recipe.prep || ['清洗并按步骤切配食材。']).map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ul></section><section><h3>烹饪时间线</h3><ol class="steps detailed">${recipe.steps.map((step) => `<li><span>${escapeHtml(step)}</span></li>`).join('')}</ol>${recipe.tips?.length ? `<div class="cook-tips"><strong>不翻车小贴士</strong>${recipe.tips.map((tip) => `<p>${escapeHtml(tip)}</p>`).join('')}</div>` : ''}</section></div>
     ${gapNotice}${planned ? `<small class="plan-status detail-plan-status">${escapeHtml(planStatusText(planned))}</small>` : ''}
-    <div class="recipe-actions"><button class="secondary-button" data-action="favorite-recipe" data-id="${recipe.id}">${icon('star')} ${favorite ? '已收藏' : '先收藏'}</button><button class="primary-button ${planned ? 'planned-button' : ''}" data-action="want-recipe" data-id="${recipe.id}">${icon('leaf')} ${planned ? '取消今日计划' : '今天想做'}</button><button class="secondary-button" data-action="${backMode}">${icon('back')} 返回推荐</button></div>
+    <div class="recipe-actions"><button class="secondary-button" data-action="favorite-recipe" data-id="${recipe.id}">${icon('star')} ${favorite ? '已收藏' : '先收藏'}</button><button class="primary-button ${planned ? 'planned-button' : ''}" data-action="want-recipe" data-id="${recipe.id}">${icon('pot')} ${planned ? '取消今日计划' : '今天想做'}</button><button class="secondary-button" data-action="${backMode}">${icon('back')} 返回推荐</button></div>
   </article>`;
 }
 
@@ -376,21 +475,22 @@ function renderProfile(state) {
   const essentials = normalizeEssentialItems(profile);
   const times = [...(profile.mealTimes || [])].slice(0, Number(profile.mealsPerDay || 3));
   while (times.length < Number(profile.mealsPerDay || 3)) times.push('12:00');
-  return `<section class="simple-page-heading"><div><p class="eyebrow">PROFILE & REMINDERS</p><h1>偏好与提醒</h1><p>把饮食习惯和提醒节奏设成适合自己的样子，之后随时都能改。</p></div><div class="avatar">${escapeHtml(profile.name.slice(0, 1))}</div></section><div class="profile-layout"><section class="profile-card"><div class="profile-intro"><div class="avatar large">${escapeHtml(profile.name.slice(0, 1))}</div><div><h2>${escapeHtml(profile.name)}</h2><p>过敏与明确忌口会在每次生成后再次检查</p></div></div><div class="profile-section"><div class="section-title"><h3>过敏与明确忌口</h3><span class="hard-badge">不可违反</span></div><div class="editable-tags constraint-tags">${(profile.allergies || []).map((tag) => `<span class="danger-tag">${escapeHtml(tag)}过敏<button data-action="remove-constraint" data-kind="allergies" data-name="${escapeHtml(tag)}">×</button></span>`).join('')}${(profile.dislikes || []).map((tag) => `<span>${escapeHtml(tag)}（不喜欢）<button data-action="remove-constraint" data-kind="dislikes" data-name="${escapeHtml(tag)}">×</button></span>`).join('')}</div><form class="inline-form" data-form="constraint-add"><select name="kind"><option value="allergies">过敏</option><option value="dislikes">不喜欢</option></select><input name="name" placeholder="输入食材" required><button type="submit">添加</button></form></div><div class="profile-section"><h3>必备食材清单</h3><p class="section-copy">每种食材单独设置低于多少库存时提醒采购。</p><div class="essential-editor">${essentials.map((item) => `<div><span>${escapeHtml(item.name)}</span><label>低于 <input type="number" min="1" max="100" value="${item.threshold}" data-essential-threshold="${escapeHtml(item.name)}"> %</label><button data-action="remove-essential" data-name="${escapeHtml(item.name)}">${icon('trash')}</button></div>`).join('')}</div><form class="essential-add" data-form="essential-add"><input name="name" placeholder="例如：盐、面条" required><input name="threshold" type="number" min="1" max="100" value="20" aria-label="提醒百分比"><button type="submit">添加</button></form></div><div class="profile-section"><div class="section-title"><h3>规律用餐</h3><label class="meal-count">每天 <select data-profile="mealsPerDay">${[1,2,3,4,5].map((n) => `<option value="${n}" ${Number(profile.mealsPerDay) === n ? 'selected' : ''}>${n}</option>`).join('')}</select> 顿</label></div><div class="meal-times">${times.map((time, index) => `<label>第 ${index + 1} 顿<input type="time" value="${time}" data-meal-time="${index}"></label>`).join('')}</div></div></section><section class="profile-card"><div class="section-title"><div><p class="eyebrow">NOTIFICATIONS</p><h3>电脑通知</h3></div><button class="notification-toggle ${settings.enabled ? 'on' : ''}" data-action="enable-notifications">${settings.enabled ? '已开启' : '开启通知'}</button></div><div class="settings-list"><label><span><strong>临期食材提醒</strong><small>到期前几天开始提醒</small></span><span class="setting-inline"><input type="checkbox" data-setting="expiry" ${settings.expiry ? 'checked' : ''}><input type="number" min="1" max="30" data-setting="expiryDaysBefore" value="${settings.expiryDaysBefore}"><em>天前</em></span></label><label><span><strong>每日食谱规划</strong><small>在同一处开启并选择规划时间</small></span><span class="setting-inline"><input type="checkbox" data-setting="dailyRecipe" ${settings.dailyRecipe ? 'checked' : ''}><input type="time" data-setting="planningTime" value="${escapeHtml(settings.planningTime)}"></span></label><label class="stack-setting"><span><strong>餐后消耗确认</strong><small>选择最适合你的记录方式</small></span><select data-setting="mealReviewMode"><option value="after_meal" ${settings.mealReviewMode === 'after_meal' ? 'selected' : ''}>每餐饭后提醒</option><option value="fixed_time" ${settings.mealReviewMode === 'fixed_time' ? 'selected' : ''}>每天固定时间</option><option value="none" ${settings.mealReviewMode === 'none' ? 'selected' : ''}>不记录用量，用完手动删除</option></select></label>${settings.mealReviewMode === 'after_meal' ? `<label><span><strong>饭后多久提醒</strong><small>按上方每顿用餐时间自动顺延</small></span><span class="setting-inline"><input type="number" min="0" max="6" step="0.5" data-setting="afterMealHours" value="${settings.afterMealHours}"><em>小时</em></span></label>` : ''}${settings.mealReviewMode === 'fixed_time' ? `<label><span><strong>固定提醒时间</strong><small>集中核对当天消耗</small></span><input type="time" data-setting="fixedReviewTime" value="${escapeHtml(settings.fixedReviewTime)}"></label>` : ''}</div>${state.pendingMealReviews.length ? `<div class="pending-review"><strong>${state.pendingMealReviews.length} 顿饭等待确认</strong><button data-action="review-pending">现在确认</button></div>` : ''}</section></div><button class="reset-link" data-action="reset-demo">${icon('refresh')} 重置演示数据</button>`;
+  return `<section class="simple-page-heading"><div><p class="eyebrow">PROFILE & REMINDERS</p><h1>偏好与提醒</h1><p>把饮食习惯和提醒节奏设成适合自己的样子，之后随时都能改。</p></div><div class="avatar">${escapeHtml(profile.name.slice(0, 1))}</div></section><div class="profile-layout"><section class="profile-card"><div class="profile-intro"><div class="avatar large">${escapeHtml(profile.name.slice(0, 1))}</div><div><h2>${escapeHtml(profile.name)}</h2><p>过敏与明确忌口会在每次生成后再次检查</p></div></div><div class="profile-section"><div class="section-title"><h3>过敏与明确忌口</h3></div><div class="editable-tags constraint-tags">${(profile.allergies || []).map((tag) => `<span class="danger-tag">${escapeHtml(tag)}过敏<button data-action="remove-constraint" data-kind="allergies" data-name="${escapeHtml(tag)}">×</button></span>`).join('')}${(profile.dislikes || []).map((tag) => `<span>${escapeHtml(tag)}（不喜欢）<button data-action="remove-constraint" data-kind="dislikes" data-name="${escapeHtml(tag)}">×</button></span>`).join('')}</div><form class="inline-form" data-form="constraint-add"><select name="kind"><option value="allergies">过敏</option><option value="dislikes">不喜欢</option></select><input name="name" placeholder="输入食材" required><button type="submit">添加</button></form></div><div class="profile-section"><h3>必备食材清单</h3><p class="section-copy">每种食材单独设置低于多少库存时提醒采购。</p><div class="essential-editor">${essentials.map((item) => `<div><span>${escapeHtml(item.name)}</span><label>低于 <input type="number" min="1" max="100" value="${item.threshold}" data-essential-threshold="${escapeHtml(item.name)}"> %</label><button data-action="remove-essential" data-name="${escapeHtml(item.name)}">${icon('trash')}</button></div>`).join('')}</div><form class="essential-add" data-form="essential-add"><input name="name" placeholder="例如：盐、面条" required><input name="threshold" type="number" min="1" max="100" value="20" aria-label="提醒百分比"><button type="submit">添加</button></form></div><div class="profile-section"><div class="section-title"><h3>规律用餐</h3><label class="meal-count">每天 <select data-profile="mealsPerDay">${MEAL_COUNTS.map((n) => `<option value="${n}" ${Number(profile.mealsPerDay) === n ? 'selected' : ''}>${n}</option>`).join('')}</select> 顿</label></div><div class="meal-times">${times.map((time, index) => `<label>第 ${index + 1} 顿<input type="time" value="${time}" data-meal-time="${index}"></label>`).join('')}</div></div></section><section class="profile-card"><div class="section-title"><div><p class="eyebrow">NOTIFICATIONS</p><h3>电脑通知</h3></div><button class="notification-toggle ${settings.enabled ? 'on' : ''}" data-action="enable-notifications">${settings.enabled ? '已开启' : '开启通知'}</button></div><div class="settings-list"><label><span><strong>临期食材提醒</strong><small>到期前几天开始提醒</small></span><span class="setting-inline"><input type="checkbox" data-setting="expiry" ${settings.expiry ? 'checked' : ''}><input type="number" min="1" max="30" data-setting="expiryDaysBefore" value="${settings.expiryDaysBefore}"><em>天前</em></span></label><label><span><strong>每日食谱规划</strong><small>在同一处开启并选择规划时间</small></span><span class="setting-inline"><input type="checkbox" data-setting="dailyRecipe" ${settings.dailyRecipe ? 'checked' : ''}><input type="time" data-setting="planningTime" value="${escapeHtml(settings.planningTime)}"></span></label><label class="stack-setting"><span><strong>餐后消耗确认</strong><small>选择最适合你的记录方式</small></span><select data-setting="mealReviewMode"><option value="after_meal" ${settings.mealReviewMode === 'after_meal' ? 'selected' : ''}>每餐饭后提醒</option><option value="fixed_time" ${settings.mealReviewMode === 'fixed_time' ? 'selected' : ''}>每天固定时间</option><option value="none" ${settings.mealReviewMode === 'none' ? 'selected' : ''}>不记录用量，用完手动删除</option></select></label>${settings.mealReviewMode === 'after_meal' ? `<label><span><strong>饭后多久提醒</strong><small>按上方每顿用餐时间自动顺延</small></span><span class="setting-inline"><input type="number" min="0" max="6" step="0.5" data-setting="afterMealHours" value="${settings.afterMealHours}"><em>小时</em></span></label>` : ''}${settings.mealReviewMode === 'fixed_time' ? `<label><span><strong>固定提醒时间</strong><small>集中核对当天消耗</small></span><input type="time" data-setting="fixedReviewTime" value="${escapeHtml(settings.fixedReviewTime)}"></label>` : ''}</div>${state.pendingMealReviews.length ? `<div class="pending-review"><strong>${state.pendingMealReviews.length} 顿饭等待确认</strong><button data-action="review-pending">现在确认</button></div>` : ''}</section></div><button class="reset-link" data-action="reset-demo">${icon('refresh')} 重置演示数据</button>`;
 }
 
 function renderProfileV4(state) {
   const profile = state.profile; const settings = state.notificationSettings; const essentials = normalizeEssentialItems(profile);
   const times = [...(profile.mealTimes || [])].slice(0, Number(profile.mealsPerDay || 3)); while (times.length < Number(profile.mealsPerDay || 3)) times.push('12:00');
-  return `<section class="simple-page-heading"><div><p class="eyebrow">PROFILE & REMINDERS</p><h1>偏好与提醒</h1><p>你的口味、冰箱实际温度和提醒节奏都会参与推荐；这里的设置之后随时能改。</p></div><div class="avatar">${escapeHtml((profile.name || 'U').slice(0, 1))}</div></section><div class="profile-layout"><section class="profile-card"><div class="profile-intro"><div class="avatar large">${escapeHtml((profile.name || 'U').slice(0, 1))}</div><div><h2>${escapeHtml(profile.name)}</h2><p>${escapeHtml(profile.phone || '手机号未同步')} · 过敏与忌口是不可违反的硬约束</p></div></div><div class="profile-section"><div class="section-title"><h3>过敏与明确忌口</h3><span class="hard-badge">不可违反</span></div><div class="editable-tags constraint-tags">${(profile.allergies || []).map((tag) => `<span class="danger-tag">${escapeHtml(tag)}过敏<button data-action="remove-constraint" data-kind="allergies" data-name="${escapeHtml(tag)}">×</button></span>`).join('')}${(profile.dislikes || []).map((tag) => `<span>${escapeHtml(tag)}（不喜欢）<button data-action="remove-constraint" data-kind="dislikes" data-name="${escapeHtml(tag)}">×</button></span>`).join('')}</div><form class="inline-form" data-form="constraint-add"><select name="kind"><option value="allergies">过敏</option><option value="dislikes">不喜欢</option></select><input name="name" placeholder="输入食材" required><button type="submit">添加</button></form></div><div class="profile-section"><h3>口味画像</h3><p class="taste-summary">${escapeHtml(profile.tasteProfileSummary || '还没有形成口味画像')}</p><span class="profile-field-title">喜欢的味道</span><div class="choice-cloud compact">${TASTE_OPTIONS.map((item) => `<label><input type="checkbox" data-profile-tag="tasteTags" value="${item}" ${(profile.tasteTags || []).includes(item) ? 'checked' : ''}><span>${item}</span></label>`).join('')}</div><span class="profile-field-title">地区风味</span><div class="choice-cloud compact">${CUISINE_OPTIONS.map((item) => `<label><input type="checkbox" data-profile-tag="cuisineTags" value="${item}" ${(profile.cuisineTags || []).includes(item) ? 'checked' : ''}><span>${item}</span></label>`).join('')}</div><label class="profile-notes">更多偏好<textarea data-profile-text="tasteNotes" placeholder="例如：喜欢微辣、有锅气、不要太油">${escapeHtml(profile.tasteNotes || '')}</textarea></label></div><div class="profile-section"><h3>冰箱温度</h3><p class="section-copy">请以冰箱显示或温度计实测为准；生成储存建议时会带上这两个条件。</p><div class="temperature-setup compact"><label>冷藏<input type="number" min="0" max="10" step="0.5" value="${profile.fridgeTemperatureC ?? 4}" data-profile-temp="fridgeTemperatureC"><span>°C</span><small>常用参考 ≤4°C</small></label><label>冷冻<input type="number" min="-30" max="0" step="1" value="${profile.freezerTemperatureC ?? -18}" data-profile-temp="freezerTemperatureC"><span>°C</span><small>常用参考 ≤−18°C</small></label></div></div><div class="profile-section"><h3>必备食材清单</h3><p class="section-copy">每种食材单独设置低于多少库存时提醒采购。</p><div class="essential-editor">${essentials.map((item) => `<div><span>${escapeHtml(item.name)}</span><label>低于 <input type="number" min="1" max="100" value="${item.threshold}" data-essential-threshold="${escapeHtml(item.name)}"> %</label><button data-action="remove-essential" data-name="${escapeHtml(item.name)}">${icon('trash')}</button></div>`).join('')}</div><form class="essential-add" data-form="essential-add"><input name="name" placeholder="例如：盐、面条" required><input name="threshold" type="number" min="1" max="100" value="20" aria-label="提醒百分比"><button type="submit">添加</button></form></div></section><section class="profile-card"><div class="section-title"><div><p class="eyebrow">NOTIFICATIONS</p><h3>提醒方式</h3></div><button class="notification-toggle ${settings.enabled ? 'on' : ''}" data-action="enable-notifications">${settings.enabled ? '已开启' : '开启通知'}</button></div><div class="settings-list"><label><span><strong>通知通道</strong><small>短信只发到已验证手机号 ${escapeHtml(profile.phone || '')}</small></span><select data-setting="channel"><option value="app" ${settings.channel === 'app' ? 'selected' : ''}>仅应用内/电脑</option><option value="sms" ${settings.channel === 'sms' ? 'selected' : ''}>仅短信</option><option value="both" ${settings.channel === 'both' ? 'selected' : ''}>应用内 + 短信</option></select></label><label><span><strong>允许短信提醒</strong><small>可随时关闭，不用于营销</small></span><input type="checkbox" data-setting="smsConsent" ${settings.smsConsent ? 'checked' : ''}></label><label><span><strong>临期食材提醒</strong><small>到期前几天开始提醒</small></span><span class="setting-inline"><input type="checkbox" data-setting="expiry" ${settings.expiry ? 'checked' : ''}><input type="number" min="1" max="30" data-setting="expiryDaysBefore" value="${settings.expiryDaysBefore}"><em>天前</em></span></label><label><span><strong>每日食谱规划</strong><small>开启并选择每天查看推荐的时间</small></span><span class="setting-inline"><input type="checkbox" data-setting="dailyRecipe" ${settings.dailyRecipe ? 'checked' : ''}><input type="time" data-setting="planningTime" value="${escapeHtml(settings.planningTime)}"></span></label><label><span><strong>“今天想做”确认</strong><small>到点后询问这道菜实际做了没有</small></span><input type="time" data-setting="planConfirmationTime" value="${escapeHtml(settings.planConfirmationTime || '21:30')}"></label><label class="stack-setting"><span><strong>做完后的消耗记录</strong><small>只有确认做了才会进入用量核对</small></span><select data-setting="mealReviewMode"><option value="after_meal" ${settings.mealReviewMode === 'after_meal' ? 'selected' : ''}>确认做了后立即核对</option><option value="fixed_time" ${settings.mealReviewMode === 'fixed_time' ? 'selected' : ''}>每天固定时间集中核对</option><option value="none" ${settings.mealReviewMode === 'none' ? 'selected' : ''}>不记录用量，用完手动删除</option></select></label>${settings.mealReviewMode === 'fixed_time' ? `<label><span><strong>集中核对时间</strong><small>处理当天等待确认的用量</small></span><input type="time" data-setting="fixedReviewTime" value="${escapeHtml(settings.fixedReviewTime)}"></label>` : ''}</div><div class="profile-section"><div class="section-title"><h3>规律用餐</h3><label class="meal-count">每天 <select data-profile="mealsPerDay">${[1,2,3,4,5].map((n) => `<option value="${n}" ${Number(profile.mealsPerDay) === n ? 'selected' : ''}>${n}</option>`).join('')}</select> 顿</label></div><div class="meal-times">${times.map((time, index) => `<label>第 ${index + 1} 顿<input type="time" value="${time}" data-meal-time="${index}"></label>`).join('')}</div></div>${state.plannedMeals.some((item) => item.status === 'planned') ? `<div class="pending-review"><strong>${state.plannedMeals.filter((item) => item.status === 'planned').length} 道“今天想做”等待晚间确认</strong><button data-action="check-plan-now">现在确认</button></div>` : ''}</section></div><button class="reset-link" data-action="reset-demo">${icon('refresh')} 重置演示数据</button>`;
+  return `<section class="simple-page-heading"><div><p class="eyebrow">PROFILE & REMINDERS</p><h1>偏好与提醒</h1><p>你的口味、冰箱实际温度和提醒节奏都会参与推荐；这里的设置之后随时能改。</p></div></section><div class="profile-layout"><section class="profile-card"><div class="profile-intro"><div class="avatar large">${escapeHtml((profile.name || 'U').slice(0, 1))}</div><div><h2>${escapeHtml(profile.name)}</h2><p class="profile-phone"><span>${escapeHtml(profile.phone || '手机号未同步')}</span><button type="button" class="secondary-button" data-action="change-profile-phone">更改</button></p></div></div><div class="profile-section"><div class="section-title"><h3>过敏与明确忌口</h3></div><div class="editable-tags constraint-tags">${(profile.allergies || []).map((tag) => `<span class="danger-tag">${escapeHtml(tag)}过敏<button data-action="remove-constraint" data-kind="allergies" data-name="${escapeHtml(tag)}">×</button></span>`).join('')}${(profile.dislikes || []).map((tag) => `<span>${escapeHtml(tag)}（不喜欢）<button data-action="remove-constraint" data-kind="dislikes" data-name="${escapeHtml(tag)}">×</button></span>`).join('')}</div><form class="inline-form" data-form="constraint-add"><select name="kind"><option value="allergies">过敏</option><option value="dislikes">不喜欢</option></select><input name="name" placeholder="输入食材" required><button type="submit">添加</button></form></div><div class="profile-section"><h3>口味画像</h3><p class="taste-summary">${escapeHtml(buildTasteProfile(profile))}</p><span class="profile-field-title">喜欢的味道</span><div class="choice-cloud compact">${TASTE_OPTIONS.map((item) => `<label><input type="checkbox" data-profile-tag="tasteTags" value="${item}" ${(profile.tasteTags || []).includes(item) ? 'checked' : ''}><span>${item}</span></label>`).join('')}</div><span class="profile-field-title">地区风味</span><div class="choice-cloud compact">${CUISINE_OPTIONS.map((item) => `<label><input type="checkbox" data-profile-tag="cuisineTags" value="${item}" ${(profile.cuisineTags || []).includes(item) ? 'checked' : ''}><span>${item}</span></label>`).join('')}</div><label class="profile-notes">更多偏好<textarea data-profile-text="tasteNotes" placeholder="例如：喜欢微辣、有锅气、不要太油">${escapeHtml(profileNotesDraft ?? profile.tasteNotes ?? '')}</textarea></label><div class="preference-save"><small>确认后更新口味画像，应用于下一次菜谱推荐。</small><button class="primary-button" type="button" data-action="save-preferences">确认并更新画像</button></div></div><div class="profile-section"><h3>冰箱温度</h3><p class="section-copy">请以冰箱显示或温度计实测为准；生成储存建议时会带上这两个条件。</p><div class="temperature-setup compact"><label>冷藏<input type="number" min="0" max="10" step="0.5" value="${profile.fridgeTemperatureC ?? 4}" data-profile-temp="fridgeTemperatureC"><span>°C</span><small>常用参考 ≤4°C</small></label><label>冷冻<input type="number" min="-30" max="0" step="1" value="${profile.freezerTemperatureC ?? -18}" data-profile-temp="freezerTemperatureC"><span>°C</span><small>常用参考 ≤−18°C</small></label></div></div><div class="profile-section"><h3>必备食材清单</h3><p class="section-copy">每种食材单独设置低于多少库存时提醒采购。</p><div class="essential-editor">${essentials.map((item) => `<div><span>${escapeHtml(item.name)}</span><label>低于 <input type="number" min="1" max="100" value="${item.threshold}" data-essential-threshold="${escapeHtml(item.name)}"> %</label><button data-action="remove-essential" data-name="${escapeHtml(item.name)}">${icon('trash')}</button></div>`).join('')}</div><form class="essential-add" data-form="essential-add"><input name="name" placeholder="例如：盐、面条" required><input name="threshold" type="number" min="1" max="100" value="20" aria-label="提醒百分比"><button type="submit">添加</button></form></div></section><section class="profile-card"><div class="section-title"><div><p class="eyebrow">NOTIFICATIONS</p><h3>提醒方式</h3></div><button class="notification-toggle ${settings.enabled ? 'on' : ''}" data-action="enable-notifications">${settings.enabled ? '已开启' : '开启通知'}</button></div><div class="settings-list"><label><span><strong>通知通道</strong><small>短信只发到已验证手机号 ${escapeHtml(profile.phone || '')}</small></span><select data-setting="channel"><option value="app" ${settings.channel === 'app' ? 'selected' : ''}>仅应用内/电脑</option><option value="sms" ${settings.channel === 'sms' ? 'selected' : ''}>仅短信</option><option value="both" ${settings.channel === 'both' ? 'selected' : ''}>应用内 + 短信</option></select></label><label><span><strong>允许短信提醒</strong><small>可随时关闭，不用于营销</small></span><input type="checkbox" data-setting="smsConsent" ${settings.smsConsent ? 'checked' : ''}></label><label><span><strong>临期食材提醒</strong><small>到期前几天开始提醒</small></span><span class="setting-inline"><input type="checkbox" data-setting="expiry" ${settings.expiry ? 'checked' : ''}><input type="number" min="1" max="30" data-setting="expiryDaysBefore" value="${settings.expiryDaysBefore}"><em>天前</em></span></label><label><span><strong>每日食谱规划</strong><small>开启并选择每天查看推荐的时间</small></span><span class="setting-inline"><input type="checkbox" data-setting="dailyRecipe" ${settings.dailyRecipe ? 'checked' : ''}><input type="time" data-setting="planningTime" value="${escapeHtml(settings.planningTime)}"></span></label><label><span><strong>“今天想做”确认</strong><small>到点后询问这道菜实际做了没有</small></span><input type="time" data-setting="planConfirmationTime" value="${escapeHtml(settings.planConfirmationTime || '21:30')}"></label><label class="stack-setting"><span><strong>做完后的消耗记录</strong><small>只有确认做了才会进入用量核对</small></span><select data-setting="mealReviewMode"><option value="after_meal" ${settings.mealReviewMode === 'after_meal' ? 'selected' : ''}>确认做了后立即核对</option><option value="fixed_time" ${settings.mealReviewMode === 'fixed_time' ? 'selected' : ''}>每天固定时间集中核对</option><option value="none" ${settings.mealReviewMode === 'none' ? 'selected' : ''}>不记录用量，用完手动删除</option></select></label>${settings.mealReviewMode === 'fixed_time' ? `<label><span><strong>集中核对时间</strong><small>处理当天等待确认的用量</small></span><input type="time" data-setting="fixedReviewTime" value="${escapeHtml(settings.fixedReviewTime)}"></label>` : ''}</div><div class="profile-section"><div class="section-title"><h3>规律用餐</h3><label class="meal-count">每天 <select data-profile="mealsPerDay">${MEAL_COUNTS.map((n) => `<option value="${n}" ${Number(profile.mealsPerDay) === n ? 'selected' : ''}>${n}</option>`).join('')}</select> 顿</label></div><div class="meal-times">${times.map((time, index) => `<label>第 ${index + 1} 顿<input type="time" value="${time}" data-meal-time="${index}"></label>`).join('')}</div></div>${state.plannedMeals.some((item) => item.status === 'planned') ? `<div class="pending-review"><strong>${state.plannedMeals.filter((item) => item.status === 'planned').length} 道“今天想做”等待晚间确认</strong><button data-action="check-plan-now">现在确认</button></div>` : ''}</section></div><div class="profile-legal-actions"><button class="reset-link" data-action="open-user-notice">用户须知</button><button class="reset-link" data-action="reset-demo">${icon('refresh')} 重置演示数据</button></div>`;
 }
 
 function cleanList(value) {
-  return String(value || '').split(/[、,，;；\n]/).map((item) => item.trim()).filter((item) => item && item !== '无' && item !== '没有');
+  return String(value || '').split(/[、,，;；\n]/).map((item) => item.trim()).filter((item) => item && !/^(无|没有|none|no|n\/a)$/i.test(item));
 }
 
 function blankOnboardingProfile(phone) {
   return {
+    interfaceLanguage: store.get().profile?.interfaceLanguage || 'zh-CN',
     name: '',
     phone,
     allergies: [],
@@ -412,6 +512,7 @@ function applyRemoteProfile(remote, phone) {
   const schedule = remote?.meal_schedule || {};
   const temperatures = remote?.appliance_temperatures || {};
   return {
+    interfaceLanguage: remote?.notification_settings?.interfaceLanguage || store.get().profile?.interfaceLanguage || 'zh-CN',
     name: remote?.display_name || '',
     phone: remote?.phone || phone,
     allergies: remote?.allergies || [],
@@ -454,10 +555,16 @@ function bindAuthEvents() {
     } catch (error) { button.disabled = false; button.textContent = '验证并继续'; notify(error.message); }
   });
   document.querySelector('[data-action="change-phone"]')?.addEventListener('click', () => store.update((next) => { next.auth.stage = 'phone'; next.auth.phone = ''; }));
-  document.querySelector('[data-action="demo-enter"]')?.addEventListener('click', () => store.update((next) => { next.auth = { authenticated: true, onboardingComplete: true, stage: 'phone', phone: '+6581234567', session: { access_token: 'demo', user: { id: 'demo-user', phone: '+6581234567' } }, demoMode: true }; next.profile.onboardingComplete = true; next.profile.phone = '+6581234567'; }));
+  document.querySelector('[data-action="demo-enter"]')?.addEventListener('click', () => store.update((next) => { next.auth = { noticeAccepted: true, authenticated: true, onboardingComplete: true, stage: 'phone', phone: '+6581234567', session: { access_token: 'demo', user: { id: 'demo-user', phone: '+6581234567' } }, demoMode: true }; next.profile.onboardingComplete = true; next.profile.phone = '+6581234567'; }));
 }
 
 function bindOnboardingEvents() {
+  document.querySelector('[name="mealsPerDay"]')?.addEventListener('change', (event) => {
+    document.querySelectorAll('[data-onboarding-meal]').forEach((label) => {
+      const hidden = Number(label.dataset.onboardingMeal) > Number(event.target.value);
+      label.hidden = hidden; label.querySelector('input').disabled = hidden;
+    });
+  });
   document.querySelector('[data-form="onboarding"]')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -465,7 +572,7 @@ function bindOnboardingEvents() {
     if (!tastes.length) { notify('请至少选择一种喜欢的味道，之后仍可修改'); return; }
     const skipReminders = event.submitter?.dataset.skipReminders === 'true';
     const allergies = cleanList(form.get('allergies')); const dislikes = cleanList(form.get('dislikes'));
-    const mealTimes = [form.get('mealTime1'), form.get('mealTime2'), form.get('mealTime3')].filter(Boolean).slice(0, Number(form.get('mealsPerDay')));
+    const mealTimes = MEAL_COUNTS.slice(0, Number(form.get('mealsPerDay'))).map((n) => form.get(`mealTime${n}`));
     store.update((next) => {
       Object.assign(next.profile, {
         name: form.get('name').trim(), phone: next.auth.phone, allergies, dislikes, tasteTags: tastes, cuisineTags: form.getAll('cuisineTags'), tasteNotes: form.get('tasteNotes').trim(), mealsPerDay: Number(form.get('mealsPerDay')), mealTimes,
@@ -488,6 +595,7 @@ function bindOnboardingEvents() {
 }
 
 function bindEvents() {
+  document.querySelector('[data-action="retry-recipe-translation"]')?.addEventListener('click', () => { recipeTranslationFailures.clear(); render(); });
   document.querySelectorAll('[data-tab]').forEach((button) => button.addEventListener('click', () => {
     const tab = button.dataset.tab;
     navigateView({ activeTab: tab });
@@ -527,11 +635,15 @@ function bindEvents() {
   document.querySelectorAll('[data-action="remove-constraint"]').forEach((button) => button.addEventListener('click', () => removeConstraint(button.dataset.kind, button.dataset.name)));
   document.querySelectorAll('[data-setting]').forEach((input) => input.addEventListener('change', updateNotificationSetting));
   document.querySelectorAll('[data-profile-tag]').forEach((input) => input.addEventListener('change', updateProfileTags));
-  document.querySelectorAll('[data-profile-text]').forEach((input) => input.addEventListener('change', updateProfileText));
+  document.querySelectorAll('[data-profile-text]').forEach((input) => input.addEventListener('input', (event) => { profileNotesDraft = event.target.value; }));
+  document.querySelector('[data-action="save-preferences"]')?.addEventListener('click', updateProfileText);
+  document.querySelector('[data-action="change-profile-phone"]')?.addEventListener('click', openPhoneChange);
   document.querySelectorAll('[data-profile-temp]').forEach((input) => input.addEventListener('change', updateProfileTemperature));
+  document.querySelector('[data-profile-language]')?.addEventListener('change', updateProfileLanguage);
   document.querySelector('[data-profile="mealsPerDay"]')?.addEventListener('change', updateMealsPerDay);
   document.querySelectorAll('[data-meal-time]').forEach((input) => input.addEventListener('change', updateMealTime));
   document.querySelectorAll('[data-action="enable-notifications"]').forEach((button) => button.addEventListener('click', requestNotificationPermission));
+  document.querySelectorAll('[data-action="open-user-notice"]').forEach((button) => button.addEventListener('click', openUserNotice));
   document.querySelectorAll('[data-action="reset-demo"]').forEach((button) => button.addEventListener('click', () => { store.reset(); refreshDailyRecommendations(); notify('演示数据已恢复'); }));
   document.querySelectorAll('[data-action="review-pending"]').forEach((button) => button.addEventListener('click', () => { const pending = store.get().pendingMealReviews[0]; if (pending) openConsumptionReview(pending.recipe, null, pending.id); }));
   document.querySelectorAll('[data-action="check-plan-now"]').forEach((button) => button.addEventListener('click', () => {
@@ -549,6 +661,7 @@ function updateInventorySearch(event) {
   if (!results || !count) return;
   count.textContent = `${filtered.length} 项`;
   results.innerHTML = filtered.map((item) => renderFoodRow(item, state.inventoryManageMode)).join('') || '<div class="empty-list">没有符合条件的食材</div>';
+  applyInterfaceLanguage(results, state.profile?.interfaceLanguage);
   bindInventoryRowEvents(results);
 }
 
@@ -575,7 +688,7 @@ async function refreshDailyRecommendations() {
     if (runId !== recipeGenerationRun) return;
     store.update((next) => { next.dailyRecommendations = recipes; next.dailyRecommendationError = null; next.feedRefreshCount = (next.feedRefreshCount || 0) + 1; next.isGenerating = false; next.recipeMode = 'feed'; });
     hydrateRecipeImages(recipes, 'daily');
-    notify('今日推荐已经换了一组');
+    notify('今日推荐已更新', 2000);
   } catch (error) {
     if (runId !== recipeGenerationRun) return;
     store.set({ isGenerating: false, dailyRecommendationError: error.message || '生成失败，请重试' });
@@ -739,7 +852,7 @@ function openConsumptionReview(recipe, planId = null, pendingId = null) {
   });
   const rows = reviewable.map(({ ingredient, current }) => {
     if (current.managementMode === 'tracked_quantity') {
-      const sameUnit = !ingredient.unit || ingredient.unit === current.unit;
+      const sameUnit = !ingredient.unit || canonicalUnit(ingredient.unit) === canonicalUnit(current.unit);
       const suggested = sameUnit ? ingredient.requiredAmount : Math.min(1, Number(current.quantity || 0));
       return `<label class="consumption-review-row" data-review-item data-id="${current.id}" data-mode="tracked_quantity"><span class="food-symbol">${ingredientIcon(ingredient.name)}</span><span><strong>${escapeHtml(ingredient.name)}</strong><small>${sameUnit ? `菜谱建议 ${ingredient.requiredAmount} ${escapeHtml(ingredient.unit)}` : `菜谱按 ${escapeHtml(ingredient.unit)}、库存按 ${escapeHtml(current.unit)}记录，请填写实际库存单位`}</small></span><input type="number" min="0" max="${Number(current.quantity || 0)}" step="0.25" value="${suggested}"><em>${escapeHtml(current.unit)}</em></label>`;
     }
@@ -809,10 +922,55 @@ function updateProfileTags(event) {
   scheduleProfileSync();
 }
 
-function updateProfileText(event) {
-  const key = event.target.dataset.profileText;
-  store.update((next) => { next.profile[key] = event.target.value.trim(); next.profile.tasteProfileSummary = buildTasteProfile(next.profile); });
-  scheduleProfileSync();
+async function updateProfileText() {
+  const value = (profileNotesDraft ?? store.get().profile.tasteNotes ?? '').trim();
+  profileNotesDraft = null;
+  window.clearTimeout(profileSyncTimer);
+  store.update((next) => { next.profile.tasteNotes = value; next.profile.tasteProfileSummary = buildTasteProfile(next.profile); });
+  const state = store.get();
+  try {
+    await saveRemoteProfile(state.auth.session, state.profile, state.notificationSettings);
+    notify('偏好已确认，口味画像已更新；下次生成菜谱时生效');
+  } catch {
+    notify('画像已在本机更新，云端保存失败，请稍后重试');
+  }
+}
+
+function openPhoneChange() {
+  const state = store.get();
+  const demo = Boolean(state.auth.demoMode || String(state.auth.session?.user?.id || '').startsWith('demo-'));
+  const modal = createModal(`<div class="modal-heading"><h2>更改手机号</h2><p>${demo ? '当前为本地演示，不发送真实短信。演示验证码为 123456。' : '验证新手机号后才会替换当前号码。若服务要求双重确认，请依次输入收到的验证码。'}</p></div><form data-phone-change class="auth-form"><label>新手机号<input name="phone" type="tel" placeholder="例如 +65 8123 4567" autocomplete="tel" required></label><button class="primary-button" type="submit">获取验证码</button></form><p data-phone-error role="alert"></p>`);
+  const form = modal.querySelector('[data-phone-change]');
+  const error = modal.querySelector('[data-phone-error]');
+  let pendingPhone = '';
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    error.textContent = '';
+    try {
+      if (!pendingPhone) {
+        const phone = normalizePhone(form.elements.phone.value);
+        if (phone === state.profile.phone) throw new Error('请填写与当前号码不同的新手机号');
+        await requestPhoneUpdate(state.auth.session, phone, { demo });
+        if (!modal.isConnected) return;
+        pendingPhone = phone;
+        form.innerHTML = `<p>${escapeHtml(phone)}</p><label>短信验证码<input name="token" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label><button class="primary-button" type="submit">确认更改</button><small>尚未确认前，当前手机号不会改变。</small>`;
+        applyInterfaceLanguage(form, store.get().profile.interfaceLanguage);
+      } else {
+        const session = await verifyPhoneUpdate(state.auth.session, pendingPhone, form.elements.token.value, { demo });
+        // Once the server confirms a change, keep the local account in sync even if the modal was closed.
+        store.update((next) => { next.auth.session = session; next.auth.phone = pendingPhone; next.profile.phone = pendingPhone; });
+        const updated = store.get();
+        try {
+          await saveRemoteProfile(session, updated.profile, updated.notificationSettings);
+          notify(demo ? '演示手机号已更改，未发送短信' : '手机号已验证并更改');
+        } catch { notify('手机号已验证，档案同步失败，请稍后重试'); }
+        modal.remove();
+      }
+    } catch (problem) { error.textContent = problem.message; }
+    finally { button.disabled = false; }
+  });
 }
 
 function updateProfileTemperature(event) {
@@ -820,6 +978,15 @@ function updateProfileTemperature(event) {
   store.update((next) => { next.profile[key] = value; });
   scheduleProfileSync();
   notify('温度已更新，下一次储存检索会使用新条件');
+}
+
+function updateProfileLanguage(event) {
+  const interfaceLanguage = event.currentTarget.value === 'en' ? 'en' : 'zh-CN';
+  store.update((next) => {
+    next.profile.interfaceLanguage = interfaceLanguage;
+    next.notificationSettings.interfaceLanguage = interfaceLanguage;
+  });
+  scheduleProfileSync();
 }
 
 function addEssential(event) {
@@ -830,8 +997,8 @@ function addEssential(event) {
 
 function removeEssential(name) { store.update((next) => { next.profile.essentialItems = normalizeEssentialItems(next.profile).filter((item) => item.name !== name); }); }
 function updateEssentialThreshold(event) { const name = event.target.dataset.essentialThreshold; const value = Number(event.target.value) || 20; store.update((next) => { next.profile.essentialItems = normalizeEssentialItems(next.profile).map((item) => item.name === name ? { ...item, threshold: value } : item); }); }
-function updateMealsPerDay(event) { const count = Number(event.target.value); store.update((next) => { next.profile.mealsPerDay = count; while (next.profile.mealTimes.length < count) next.profile.mealTimes.push('12:00'); }); }
-function updateMealTime(event) { const index = Number(event.target.dataset.mealTime); store.update((next) => { next.profile.mealTimes[index] = event.target.value; }); }
+function updateMealsPerDay(event) { const count = Number(event.target.value); if (!MEAL_COUNTS.includes(count)) return; store.update((next) => { next.profile.mealsPerDay = count; next.profile.mealTimes = mealSchedule(count, next.profile.mealTimes); }); scheduleProfileSync(); }
+function updateMealTime(event) { const index = Number(event.target.dataset.mealTime); const value = event.target.value; if (!/^\d{2}:\d{2}$/.test(value) || index < 0 || index > 5) return; store.update((next) => { next.profile.mealTimes[index] = value; }); scheduleProfileSync(); }
 
 function updateNotificationSetting(event) {
   const key = event.target.dataset.setting;
@@ -878,6 +1045,7 @@ function renderManualGuidance(modal, guidance) {
   const sourceRows = [...new Map(guidance.storageOptions.map((option) => [option.source?.url || guidance.source?.url, option.source || guidance.source]).filter(([url]) => url)).values()];
   const packageStateField = guidance.packageStateRelevant ? `<label class="package-state-field">包装状态<select data-package-state><option value="opened" ${guidance.packageState !== 'sealed' ? 'selected' : ''}>已开封（正在使用）</option><option value="sealed" ${guidance.packageState === 'sealed' ? 'selected' : ''}>未开封</option></select><small>开封状态会改变适用储存方式和提醒日期</small></label>` : '';
   result.innerHTML = `<form data-manual-confirm class="manual-confirm"><div class="guidance-summary"><div><span class="eyebrow">已生成 · 分类与资料检索</span><h3>${escapeHtml(guidance.name)}</h3><p>自动归入「${escapeHtml(CATEGORY_LABELS[guidance.uiCategory])}」；加入列表时才匹配食材图标。</p></div><span class="source-chip">逐食材匹配</span></div><div class="temperature-basis">按你的设备设置计算：冷藏 <strong>${temperatures.fridgeC ?? 4}°C</strong> · 冷冻 <strong>${temperatures.freezerC ?? -18}°C</strong><button type="button" data-open-profile>修改</button></div><div class="manual-fields">${packageStateField}<label>数量<input data-quantity type="number" min="${COUNT_UNITS.includes(guidance.unit) ? 1 : 0}" step="${COUNT_UNITS.includes(guidance.unit) ? 1 : 25}" value="${guidance.quantity}"></label><label>单位<select data-unit>${[guidance.unit, '克', '个', '瓶', '袋', '盒', '包'].filter((value, index, array) => array.indexOf(value) === index).map((unit) => `<option>${unit}</option>`).join('')}</select></label></div><div class="field-label">可以怎样储存？<span>先看适用条件，再按你的使用打算选择。日期是最佳品质提醒，不是安全保证。</span></div><div class="manual-storage-grid">${guidance.storageOptions.map((option) => `<label class="manual-storage-option ${option.available ? '' : 'disabled'}"><input type="radio" name="storage" value="${option.location}" data-days="${option.days || ''}" ${first && option.location === first.location ? 'checked' : ''} ${option.available ? '' : 'disabled'}><span><strong>${option.location}</strong><em>${option.available ? (option.days ? `建议 ${option.days} 天内 · 至 ${storageDate(option)}` : '按包装说明') : '暂不适用'}</em>${option.sourceRange ? `<b>${escapeHtml(option.sourceRange)}</b>` : ''}${option.preparation ? `<small>前提：${escapeHtml(option.preparation)}</small>` : ''}<small>${escapeHtml(option.note || '')}</small>${option.temperatureBasis ? `<small>${escapeHtml(option.temperatureBasis)}</small>` : ''}</span></label>`).join('')}</div>${!first ? '<div class="alert danger-alert">当前名称或温度条件不足以给出可靠方式。请返回补充具体品种、部位或包装状态，系统不会套用统一天数。</div>' : ''}${guidance.expiryRequired ? `<div class="package-confirm"><strong>请优先确认包装日期</strong><p>调味品、主食和生鲜食品都会保留品质提醒；有包装标注时，它比通用参考期限更可靠。</p><label>包装标注到期日（推荐）<input type="date" data-package-date></label><button type="button" data-use-reference>暂按参考日期</button></div>` : ''}<label class="expiry-editor">预计最佳品质提醒日<input type="date" data-expiry value="${storageDate(first)}" ${first ? '' : 'disabled'}><small data-days-left>${formatDaysLeft(storageDate(first))}</small></label><div class="retrieval-note"><strong>资料来源</strong>${sourceRows.map((source) => { const url = safeSourceUrl(source?.url); return url ? `<a href="${url}" target="_blank" rel="noreferrer">${escapeHtml(source.title)}</a>` : `<span>${escapeHtml(source?.title || '本地食材知识库')}</span>`; }).join('')}<span>包装说明、连续温控和实际状态优先。</span></div><div class="modal-actions"><button type="button" class="secondary-button" data-close>取消</button><button class="primary-button" type="submit" ${first ? '' : 'disabled'}>确认并加入食材库</button></div></form>`;
+  applyInterfaceLanguage(result, store.get().profile?.interfaceLanguage);
   const form = result.querySelector('[data-manual-confirm]');
   form.querySelector('[data-open-profile]')?.addEventListener('click', () => { modal.remove(); store.set({ activeTab: 'profile' }); });
   form.querySelector('[data-package-state]')?.addEventListener('change', (event) => {
@@ -905,10 +1073,10 @@ function formatDaysLeft(date) {
 
 function openUploadRecognition(source) {
   const label = source === 'receipt' ? '购物小票' : '食材合照';
-  const modal = createModal(`<div class="modal-heading"><p class="eyebrow">IMAGE RECOGNITION</p><h2>上传${label}</h2><p>网页版从电脑或手机相册选择图片。图片会交给视觉模型识别；任何结果都要在下一步确认后才入库。</p></div><form data-upload-form class="upload-form"><label class="upload-drop">${icon('upload')}<strong>选择${label}图片</strong><span>支持 JPG、PNG、WEBP</span><input type="file" name="image" accept="image/jpeg,image/png,image/webp" required></label><img data-upload-preview alt="所选图片预览" hidden><button class="primary-button full-width" type="submit">开始识别并生成清单</button></form>`);
+  const modal = createModal(`<div class="modal-heading"><p class="eyebrow">IMAGE RECOGNITION</p><h2>上传${label}</h2><p>网页版从电脑或手机相册选择图片。图片会交给视觉模型识别；任何结果都要在下一步确认后才入库。</p></div><form data-upload-form class="upload-form"><label class="upload-drop">${icon('upload')}<strong>选择${label}图片</strong><span>支持 JPG、PNG、WEBP，单张不超过 3MB</span><input type="file" name="image" accept="image/jpeg,image/png,image/webp" required></label><img data-upload-preview alt="所选图片预览" hidden><button class="primary-button full-width" type="submit">开始识别并生成清单</button></form>`);
   const fileInput = modal.querySelector('input[type="file"]'); const preview = modal.querySelector('[data-upload-preview]');
   fileInput.addEventListener('change', () => { const file = fileInput.files[0]; if (!file) return; preview.src = URL.createObjectURL(file); preview.hidden = false; });
-  modal.querySelector('[data-upload-form]').addEventListener('submit', async (event) => { event.preventDefault(); const file = fileInput.files[0]; if (!file) return; const image = await fileToDataUrl(file); modal.querySelector('.modal-body').innerHTML = '<div class="capture-loading"><span class="spinner"></span> 正在识别图片并整理清单</div>'; try { const profile = store.get().profile; const data = await analyzeInventory({ source, image, mimeType: file.type, fileName: file.name, temperatures: { fridgeC: profile.fridgeTemperatureC, freezerC: profile.freezerTemperatureC } }); renderBatchReview(modal, data.candidates, `${label}识别`); } catch (error) { modal.querySelector('.modal-body').innerHTML = `<div class="alert danger-alert">${escapeHtml(error.message)}</div>`; } });
+  modal.querySelector('[data-upload-form]').addEventListener('submit', async (event) => { event.preventDefault(); const file = fileInput.files[0]; if (!file) return; if (file.size > 3 * 1024 * 1024) { notify('图片超过 3MB，请压缩后再上传'); return; } try { const image = await fileToDataUrl(file); modal.querySelector('.modal-body').innerHTML = '<div class="capture-loading"><span class="spinner"></span> 正在识别图片并整理清单</div>'; applyInterfaceLanguage(modal, store.get().profile?.interfaceLanguage); const profile = store.get().profile; const data = await analyzeInventory({ source, image, mimeType: file.type, fileName: file.name, interfaceLanguage: profile.interfaceLanguage || 'zh-CN', temperatures: { fridgeC: profile.fridgeTemperatureC, freezerC: profile.freezerTemperatureC } }); renderBatchReview(modal, data.candidates, `${label}识别`); } catch (error) { modal.querySelector('.modal-body').innerHTML = `<div class="alert danger-alert">${escapeHtml(error.message)}</div>`; } });
 }
 
 function fileToDataUrl(file) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file); }); }
@@ -916,6 +1084,7 @@ function fileToDataUrl(file) { return new Promise((resolve, reject) => { const r
 function renderBatchReview(modal, candidates, label) {
   modal.querySelector('.modal').classList.add('wide');
   modal.querySelector('.modal-body').innerHTML = `<div class="modal-heading"><p class="eyebrow">${escapeHtml(label)}</p><h2>确认识别清单</h2><p>请核对名称、分类、数量、储存方式和日期；包装日期敏感的食材会单独标出。</p></div><div class="batch-note"><span>储存日期会跟随所选方式变化</span><button type="button" data-default-all>全部采用当前参考日期</button></div><form data-batch-form><div class="batch-table">${candidates.map(renderBatchRow).join('')}</div><div class="modal-actions"><button type="button" class="secondary-button" data-close>取消</button><button class="primary-button" type="submit">确认 ${candidates.length} 项并加入库存</button></div></form>`;
+  applyInterfaceLanguage(modal, store.get().profile?.interfaceLanguage);
   const rows = [...modal.querySelectorAll('[data-batch-row]')];
   rows.forEach((row, index) => { row.querySelectorAll('input[type="radio"]').forEach((radio) => radio.addEventListener('change', () => { const option = candidates[index].storageOptions.find((item) => item.location === radio.value); row.querySelector('[data-expiry]').value = storageDate(option); })); row.querySelector('[data-unit]').addEventListener('change', (event) => syncQuantityForUnit(row.querySelector('[data-quantity]'), event.target.value)); });
   modal.querySelector('[data-default-all]').addEventListener('click', () => { rows.forEach((row, index) => { const selected = row.querySelector('input[type="radio"]:checked'); const option = candidates[index].storageOptions.find((item) => item.location === selected.value); row.querySelector('[data-expiry]').value = storageDate(option); }); notify('已按当前储存方式填写参考日期'); });
@@ -923,8 +1092,9 @@ function renderBatchReview(modal, candidates, label) {
 }
 
 function renderBatchRow(candidate, index) {
-  const first = candidate.storageOptions.find((item) => item.location === candidate.storageLocation && item.available) || candidate.storageOptions.find((item) => item.available);
-  return `<div class="batch-row" data-batch-row><div class="batch-item-main"><div><input class="name-input" data-name value="${escapeHtml(candidate.name)}" aria-label="食材名称"><small>${escapeHtml(CATEGORY_LABELS[candidate.uiCategory])}${candidate.expiryRequired ? ' · 包装日期需确认' : ''}</small></div></div><div class="batch-quantity"><input type="number" min="${COUNT_UNITS.includes(candidate.unit) ? 1 : 0}" step="${COUNT_UNITS.includes(candidate.unit) ? 1 : 25}" data-quantity value="${candidate.quantity}"><select data-unit>${[candidate.unit, '克', '个', '瓶', '袋', '盒', '包'].filter((value, i, array) => array.indexOf(value) === i).map((unit) => `<option>${unit}</option>`).join('')}</select></div><div class="storage-options">${candidate.storageOptions.map((option) => `<label class="storage-radio ${option.available ? '' : 'disabled'}"><input type="radio" name="storage-${index}" value="${option.location}" ${option.location === first.location ? 'checked' : ''} ${option.available ? '' : 'disabled'}><span>${option.location}<small>${option.available ? (option.days ? `${option.days} 天` : '按包装') : '不可用'}</small></span></label>`).join('')}</div><div class="date-confirm"><label>预计到期${candidate.expiryRequired ? '<em>请核对包装</em>' : ''}<input type="date" data-expiry value="${storageDate(first)}"></label></div></div>`;
+  const hasReference = candidate.storageOptions.some((item) => item.available);
+  const first = candidate.storageOptions.find((item) => item.location === candidate.storageLocation && item.available) || candidate.storageOptions.find((item) => item.available) || candidate.storageOptions[0];
+  return `<div class="batch-row" data-batch-row><div class="batch-item-main"><div><input class="name-input" data-name value="${escapeHtml(candidate.name)}" aria-label="食材名称"><small>${escapeHtml(CATEGORY_LABELS[candidate.uiCategory])}${candidate.expiryRequired ? ' · 包装日期需确认' : ''}</small></div></div><div class="batch-quantity"><input type="number" min="${COUNT_UNITS.includes(candidate.unit) ? 1 : 0}" step="${COUNT_UNITS.includes(candidate.unit) ? 1 : 25}" data-quantity value="${candidate.quantity}"><select data-unit>${[candidate.unit, '克', '个', '瓶', '袋', '盒', '包'].filter((value, i, array) => array.indexOf(value) === i).map((unit) => `<option>${unit}</option>`).join('')}</select></div><div class="storage-options">${candidate.storageOptions.map((option) => `<label class="storage-radio ${option.available || !hasReference ? '' : 'disabled'}"><input type="radio" name="storage-${index}" value="${option.location}" ${option.location === first.location ? 'checked' : ''} ${option.available || !hasReference ? '' : 'disabled'}><span>${option.location}<small>${!hasReference ? '手动确认' : option.available ? (option.days ? `${option.days} 天` : '按包装') : '不可用'}</small></span></label>`).join('')}</div><div class="date-confirm"><label>预计到期${candidate.expiryRequired ? '<em>请核对包装</em>' : ''}<input type="date" data-expiry value="${storageDate(first)}" required></label></div></div>`;
 }
 
 function buildInventoryItem(candidate, values) {
@@ -1019,12 +1189,30 @@ function openNotificationCenter() {
 
 function createModal(content, size = '') {
   const backdrop = document.createElement('div'); backdrop.className = 'modal-backdrop'; backdrop.innerHTML = `<div class="modal ${size}" role="dialog" aria-modal="true"><button class="modal-close" data-close aria-label="关闭">${icon('close')}</button><div class="modal-body">${content}</div></div>`; document.body.append(backdrop);
-  backdrop.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => backdrop.remove()));
-  backdrop.addEventListener('click', (event) => { if (event.target === backdrop) backdrop.remove(); });
+  applyInterfaceLanguage(backdrop, store.get().profile?.interfaceLanguage);
+  backdrop.addEventListener('click', (event) => {
+    if (event.target === backdrop || event.target.closest('[data-close]')) {
+      event.preventDefault(); backdrop.remove();
+    }
+  });
   return backdrop;
 }
 
-function notify(message) { store.set({ notice: message }); window.setTimeout(() => { if (store.get().notice === message) store.set({ notice: null }); }, 2800); }
+let noticeTimer = null;
+let noticeFadeTimer = null;
+function notify(message, duration = 2800) {
+  window.clearTimeout(noticeTimer);
+  window.clearTimeout(noticeFadeTimer);
+  store.set({ notice: message, noticeFading: false });
+  noticeTimer = window.setTimeout(() => {
+    if (store.get().notice !== message) return;
+    store.set({ noticeFading: true }, { silent: true });
+    app.querySelector('.toast')?.classList.add('toast-fading');
+    noticeFadeTimer = window.setTimeout(() => {
+      if (store.get().notice === message) store.set({ notice: null, noticeFading: false });
+    }, 350);
+  }, duration);
+}
 
 function startNotificationScheduler() {
   if (notificationTimer) return; notificationTimer = window.setInterval(checkScheduledNotifications, 60000); checkScheduledNotifications();

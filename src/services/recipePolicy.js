@@ -33,7 +33,7 @@ export function coreRecipeIngredients(recipe) {
 }
 
 export function isSpicyRequest(text = '') {
-  return /麻辣|香辣|酸辣|辣椒|小米辣|辣一点|微辣|中辣|重辣|想吃辣|要辣|辣/.test(text) && !/不要辣|不吃辣|不能吃辣|不辣/.test(text);
+  return /辣|\bspicy\b|\bchill?i(?:es)?\b/i.test(text) && !/不要辣|不吃辣|不能吃辣|不辣|\b(?:not|non)[ -]?spicy\b|\b(?:no|without)\s+chill?i(?:es)?\b/i.test(text);
 }
 
 export function recipeHasChili(recipe) {
@@ -51,5 +51,5 @@ export function missingCondiments(recipe, inventory = []) {
 }
 
 export function isNamedDishRequest(text = '') {
-  return /宫保|鱼香|麻婆|水煮|回锅|红烧|咖喱|冬阴功|叻沙|佛跳墙|口水鸡|辣子鸡|酸菜鱼|锅包肉|炖牛肉|煲仔饭/.test(text);
+  return /宫保|鱼香|麻婆|水煮|回锅|红烧|咖喱|冬阴功|叻沙|佛跳墙|口水鸡|辣子鸡|酸菜鱼|锅包肉|炖牛肉|煲仔饭|kung pao|mapo|curry|tom yum|laksa|beef stew|claypot rice/i.test(text);
 }

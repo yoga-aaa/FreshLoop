@@ -9,10 +9,10 @@ export function parseModelJson(text = '') {
   return JSON.parse(cleaned);
 }
 
-export async function callDeepSeek({ model = 'deepseek-v4-flash', messages, maxTokens = 5000, temperature = 0.45 }) {
+export async function callDeepSeek({ model = 'deepseek-v4-flash', messages, maxTokens = 5000, temperature = 0.45, timeoutMs = 55000 }) {
   if (!process.env.DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY is not configured');
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 55000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
     response = await fetch('https://api.deepseek.com/chat/completions', {

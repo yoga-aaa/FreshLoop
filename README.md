@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-The default mode is a deterministic local demo. Phone OTP uses `123456` when Supabase is not configured. State is persisted in `localStorage`, so the full onboarding, inventory and recipe loop works without API keys. Use **用户档案 → 重置演示数据** to return to the sign-in screen and restore the seeded kitchen.
+Without Supabase, the app supports a local demo; its demonstration OTP is `123456` and data stays in the current browser's `localStorage`. Recipe generation, recipe translation and image recognition require the server-side `DEEPSEEK_API_KEY`; no template is substituted if that service fails. Manual storage guidance uses local reference data by default. Use **Profile → Reset demo data** to restore the seeded kitchen.
 
 ## Implementation status
 
@@ -25,7 +25,8 @@ The default mode is a deterministic local demo. Phone OTP uses `123456` when Sup
 - Done: animated shopping completion, per-essential-item thresholds, editable constraints, meal schedule and three consumption-review modes.
 - Done: phone registration/login with Supabase SMS OTP, first-login taste/onboarding flow, refrigerator/freezer temperature settings and profile persistence.
 - Done: source-grounded storage retrieval that distinguishes ingredient form and preparation, exposes quality ranges/sources and refuses unknown generic freezer defaults.
-- Done: dish-specific project-owned photography, beginner recipes with explicit oil/seasoning/heat/timing, and profile-aware DeepSeek prompts.
+- Done: recipe reference images with retained source metadata, beginner recipes with explicit oil/seasoning/heat/timing, and profile-aware DeepSeek prompts. Third-party image licences still require review before public release.
+- Done: Chinese/English interface, cached translations of existing recipe names/descriptions/steps, English date picker, editable phone, explicit preference confirmation and up to six daily meal times.
 - Done: persisted “今天想做” plans, scheduled make/skip confirmation, Twilio SMS adapter and a protected reminder-worker endpoint.
 - Next: configure the production Supabase/Twilio/DeepSeek accounts and deployment scheduler.
 
@@ -56,7 +57,7 @@ src/
   data/demo.js       # seed profile and inventory
   data/ingredientKnowledge.js # curated local retrieval fallback
   state/store.js     # local persistence and reactive state
-  services/ai.js     # remote API boundary + deterministic demo fallback
+  services/ai.js     # server-side AI request boundary; explicit failure states
   services/auth.js   # Supabase phone OTP/profile persistence + reminder scheduling
   services/domain.js # validation, shopping gap and inventory rules
   main.js            # view shell and event wiring

@@ -44,6 +44,10 @@ export async function generateRecipe(args) {
   return recipes[0];
 }
 
+export async function translateRecipes(recipes, language) {
+  return requestJson('/api/generate-recipe', { action: 'translate', recipes, language }, language === 'en' ? 'Recipe translation unavailable' : '菜谱翻译暂不可用');
+}
+
 export async function searchRecipeImage(recipe) {
   const proposed = String(recipe.imageSearchQuery || '').trim();
   const ingredients = (recipe.ingredients || []).map((item) => item.canonicalName).filter(Boolean);
@@ -131,7 +135,7 @@ export async function getStorageGuidance(name, temperatures = {}, packageState =
 
 export async function analyzeInventory(payload) {
   const body = await requestJson('/api/analyze-inventory', payload, '真实图片识别服务暂时不可用');
-  const candidates = normalizeVisionCandidates(body.candidates);
+  const candidates = normalizeVisionCandidates(body.candidates, payload.interfaceLanguage);
   if (!candidates.length) throw new Error('模型没有识别出足够确定的食材，请换一张更清晰的图片');
   return { ...body, candidates };
 }

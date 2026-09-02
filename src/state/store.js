@@ -65,6 +65,7 @@ function migrateInventory(items = []) {
 function initialState() {
   return {
     auth: {
+      noticeAccepted: false,
       authenticated: false,
       onboardingComplete: false,
       stage: 'phone',
@@ -122,7 +123,13 @@ function load() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (!saved) return initialState();
-    const merged = { ...initialState(), ...JSON.parse(saved) };
+    const defaults = initialState();
+    const savedState = JSON.parse(saved);
+    const merged = { ...defaults, ...savedState };
+    merged.auth = { ...defaults.auth, ...(savedState.auth || {}) };
+    merged.profile = { ...defaults.profile, ...(savedState.profile || {}) };
+    merged.notice = null;
+    merged.noticeFading = false;
     merged.inventory = migrateInventory(merged.inventory);
     const isRealModelResult = (recipe) => recipe?.model && recipe.model !== 'curated-local' && !String(recipe.promptVersion || '').includes('local');
     merged.recipes = (merged.recipes || []).filter(isRealModelResult);

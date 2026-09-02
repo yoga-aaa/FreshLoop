@@ -1,17 +1,13 @@
 import { callDeepSeek, parseRequestBody, sendError } from './_deepseek.js';
 import { retrieveRecipeContext } from '../rag/recipeKnowledge.js';
 import { retrieveXiachufangCandidates } from '../rag/xiachufang.js';
+import { canonicalUnit } from '../../src/services/units.js';
+import { isSpicyRequest, isNamedDishRequest } from '../../src/services/recipePolicy.js';
+import { validateRecipe } from '../../src/services/domain.js';
+import { translateRecipeTexts } from './_recipeTranslation.js';
 
 const CONDIMENTS = new Set(['soy sauce', 'cooking oil', 'oyster sauce', 'salt', 'sugar', 'cornstarch', 'rice vinegar', 'vinegar', 'black pepper', 'white pepper', 'garlic', 'ginger', 'scallion', 'fresh chili', "bird's eye chili", 'dried chili', 'pickled chili', 'chili oil', 'chili bean paste', 'sesame oil', 'cooking wine', 'water']);
 const STAPLES = new Set(['rice', 'noodle', 'bread', 'potato', 'sweet potato', 'corn', 'dumpling']);
-
-function isSpicyRequest(text = '') {
-  return /麻辣|香辣|酸辣|辣椒|小米辣|辣一点|微辣|中辣|重辣|想吃辣|要辣|辣/.test(text) && !/不要辣|不吃辣|不能吃辣|不辣/.test(text);
-}
-
-function isNamedDishRequest(text = '') {
-  return /宫保|鱼香|麻婆|水煮|回锅|红烧|咖喱|冬阴功|叻沙|佛跳墙|口水鸡|辣子鸡|酸菜鱼|锅包肉|炖牛肉|煲仔饭/.test(text);
-}
 
 function isCookingInventory(item) {
   const expiry = item.expiryDate ? new Date(`${item.expiryDate}T23:59:59`) : null;
@@ -68,7 +64,7 @@ function bestWebReference(recipe, candidates, usedIds) {
   return ranked[0]?.score >= 5 ? ranked[0].candidate : null;
 }
 
-function ensureRequiredChili(recipe, index, servings) {
+function ensureRequiredChili(recipe, index, servings, english = false) {
   if (hasChili(recipe)) {
     return {
       ...recipe,
@@ -79,19 +75,22 @@ function ensureRequiredChili(recipe, index, servings) {
     };
   }
   const choices = [
-    { canonicalName: 'fresh chili', name: '鲜辣椒', requiredAmount: servings, unit: '根' },
-    { canonicalName: "bird's eye chili", name: '小米辣', requiredAmount: servings * 2, unit: '根' },
-    { canonicalName: 'dried chili', name: '干辣椒', requiredAmount: servings * 3, unit: '根' },
-    { canonicalName: 'pickled chili', name: '泡椒', requiredAmount: servings * 2, unit: '根' }
+    { canonicalName: 'fresh chili', name: english ? 'fresh chili' : '鲜辣椒', requiredAmount: servings, unit: english ? 'pc' : '根' },
+    { canonicalName: "bird's eye chili", name: english ? "bird's eye chili" : '小米辣', requiredAmount: servings * 2, unit: english ? 'pcs' : '根' },
+    { canonicalName: 'dried chili', name: english ? 'dried chili' : '干辣椒', requiredAmount: servings * 3, unit: english ? 'pcs' : '根' },
+    { canonicalName: 'pickled chili', name: english ? 'pickled chili' : '泡椒', requiredAmount: servings * 2, unit: english ? 'pcs' : '根' }
   ];
   const chili = choices[index % choices.length];
-  return { ...recipe, ingredients: [...(recipe.ingredients || []), { ...chili, userIntentRequired: true }], steps: [...(recipe.steps || []), `加入${chili.name}并炒出辣香，分两次调节用量，确保成品真正有辣味。`] };
+  return { ...recipe, ingredients: [...(recipe.ingredients || []), { ...chili, userIntentRequired: true }], steps: [...(recipe.steps || []), english ? `Add the ${chili.name} in two batches and fry until aromatic so the finished dish is genuinely spicy.` : `加入${chili.name}并炒出辣香，分两次调节用量，确保成品真正有辣味。`] };
 }
 
 export default async function handler(request, response) {
   if (request.method !== 'POST') return response.status(405).json({ error: 'Method not allowed' });
   try {
+    const body = parseRequestBody(request);
+    if (body.action === 'translate') return response.status(200).json({ recipes: await translateRecipeTexts(body) });
     const { input = {}, inventory = [], profile = {}, count = 4, history = [] } = parseRequestBody(request);
+    const outputEnglish = profile.interfaceLanguage === 'en';
     const hardConstraints = { allergies: profile.allergies || [], dislikes: profile.dislikes || [], dietaryConstraints: profile.dietaryConstraints || [] };
     const tasteProfile = { tasteTags: profile.tasteTags || [], cuisineTags: profile.cuisineTags || [], notes: profile.tasteNotes || '', summary: profile.tasteProfileSummary || '' };
     const cookingInventory = inventory.filter(isCookingInventory);
@@ -113,6 +112,12 @@ export default async function handler(request, response) {
         },
         {
           role: 'system',
+          content: outputEnglish
+            ? 'The interface language is English. Write every user-facing field in natural, concise English: recipeName, reason, planLabel, ingredient name and unit, prep, steps, and tips. Keep canonicalName and imageSearchQuery in English. Do not mix Chinese into user-facing fields.'
+            : '界面语言为简体中文。所有面向用户的菜名、理由、标签、食材名、单位、准备、步骤和提示必须使用自然简洁的中文。'
+        },
+        {
+          role: 'system',
           content: `以下是从下厨房公开搜索页提取的精简候选，仅包含菜名、主要食材、评分、来源链接，不含可复制的完整步骤：${JSON.stringify(webCandidates.map(({ id, title, ingredients, score, cooks, sourceUrl }) => ({ id, title, ingredients, score, cooks, sourceUrl })))}。候选仅用于菜式身份、用户画像筛选和配图匹配。若采用某候选，必须保持同一道菜的核心食材和烹饪形态，并在 Recipe 增加 webReferenceId=候选 id；若没有准确匹配则 webReferenceId=null。不得照抄第三方步骤。recipeName 不得带“1.”、“第一道”等任何序号。imageSearchQuery 要同时体现主要食材、烹饪形态和成品浓淡色泽。`
         },
         {
@@ -125,7 +130,7 @@ export default async function handler(request, response) {
     });
 
     let recipes = (result.recipes || []).slice(0, 4);
-    if (spicyRequired) recipes = recipes.map((recipe, index) => ensureRequiredChili(recipe, index, Number(input.servings || 1)));
+    if (spicyRequired) recipes = recipes.map((recipe, index) => ensureRequiredChili(recipe, index, Number(input.servings || 1), outputEnglish));
     const usedWebReferenceIds = new Set();
     recipes = recipes.map((recipe, index) => {
       const requestedReference = webCandidateMap.get(String(recipe.webReferenceId || '')) || null;
@@ -135,13 +140,15 @@ export default async function handler(request, response) {
       if (webReference) usedWebReferenceIds.add(webReference.id);
       return {
         ...recipe,
+        ingredients: (recipe.ingredients || []).map((item) => ({ ...item, unit: canonicalUnit(item.unit) })),
+        language: outputEnglish ? 'en' : 'zh-CN',
         id: recipe.id != null && recipe.id !== '' ? String(recipe.id) : `remote-${Date.now()}-${index}`,
-        recipeName: cleanRecipeName(recipe.recipeName) || `${(recipe.ingredients || []).slice(0, 2).map((item) => item.name).filter(Boolean).join('')}家常菜`,
+        recipeName: cleanRecipeName(recipe.recipeName) || (outputEnglish ? `${(recipe.ingredients || []).slice(0, 2).map((item) => item.name).filter(Boolean).join(' ')} home-style dish` : `${(recipe.ingredients || []).slice(0, 2).map((item) => item.name).filter(Boolean).join('')}家常菜`),
         planType: index < 2 ? 'pantry' : 'explore',
-        planLabel: index < 2 ? '尽量用现有库存' : '只补少量新食材',
+        planLabel: index < 2 ? (outputEnglish ? 'Use what you have' : '尽量用现有库存') : (outputEnglish ? 'Add only a little' : '只补少量新食材'),
         coreIngredientCount: coreCount(recipe),
-        prep: normalizeSteps(recipe.prep, ['清洗并按步骤切配食材。']),
-        steps: normalizeSteps(recipe.steps, ['按食材熟成速度依次下锅，完成后立即装盘。']),
+        prep: normalizeSteps(recipe.prep, [outputEnglish ? 'Wash and cut the ingredients as directed.' : '清洗并按步骤切配食材。']),
+        steps: normalizeSteps(recipe.steps, [outputEnglish ? 'Cook ingredients in order of required doneness, then serve immediately.' : '按食材熟成速度依次下锅，完成后立即装盘。']),
         tips: normalizeSteps(recipe.tips),
         ragEvidenceIds: (recipe.ragEvidenceIds || []).filter((id) => retrievedIds.has(id)),
         retrievalContext: retrievedContext.map(({ id, title }) => ({ id, title })),
@@ -161,6 +168,7 @@ export default async function handler(request, response) {
         promptVersion: 'recipe-v6-xiachufang-reference'
       };
     });
+    if (recipes.some((recipe) => validateRecipe(recipe, [], hardConstraints).length)) throw new Error('生成内容触及过敏或明确忌口，已拦截，请重试');
     if (recipes.length !== 4) throw new Error('Model returned an incomplete four-recipe set');
     if (new Set(recipes.map((recipe) => recipe.recipeName)).size !== recipes.length) throw new Error('Model returned duplicate recipes');
     if (recipes.some((recipe) => recipe.coreIngredientCount > 3)) throw new Error('Model exceeded the three-core-ingredient limit');

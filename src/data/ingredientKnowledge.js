@@ -124,8 +124,8 @@ function fallbackGuidance(rawName) {
 export function getIngredientGuidance(rawName = '', packageState = 'opened') {
   const name = rawName.trim();
   if (!name) return null;
-  const exact = INGREDIENT_KNOWLEDGE.flatMap((item) => item.keys.map((key) => ({ item, key })))
-    .filter(({ key }) => name === key || (key.length >= 2 && name.includes(key)))
+  const exact = INGREDIENT_KNOWLEDGE.flatMap((item) => [...item.keys, item.canonicalName, `${item.canonicalName}s`].map((key) => ({ item, key })))
+    .filter(({ key }) => name.toLowerCase() === key.toLowerCase() || (/[\u3400-\u9fff]/.test(key) && key.length >= 2 && name.includes(key)))
     .sort((a, b) => b.key.length - a.key.length)[0]?.item;
   const matched = exact ? { ...exact, name, confidence: 0.94, needsReview: Boolean(exact.requiresPackageDate) } : fallbackGuidance(name);
   return {
@@ -138,6 +138,7 @@ export function getIngredientGuidance(rawName = '', packageState = 'opened') {
 export const STORAGE_RETRIEVAL_SOURCES = [SFA_STORAGE_SOURCE, SFA_LABEL_SOURCE, USDA_FREEZING_SOURCE, USDA_BEEF_SOURCE, USDA_GROUND_BEEF_SOURCE, KIKKOMAN_SOY_SOURCE, KIKKOMAN_OYSTER_SOURCE, LKK_OYSTER_SOURCE];
 
 const PRECISE_ICON_RULES = [
+  { test: /^(?:欧芹|香菜|parsley|coriander|cilantro)$/i, icon: '🌿' },
   { test: /^(?:干辣椒|小米辣|鲜辣椒|红辣椒|青辣椒|泡椒|朝天椒|dried chili|fresh chili|bird'?s eye chili|pickled chili)$/i, icon: '🌶️' },
   { test: /^(?:米粉|米线|河粉|粉丝|rice noodles?)$/i, icon: '🍜' },
   { test: /^(?:米醋|陈醋|白醋|香醋|黑醋|果醋|醋|rice vinegar|black vinegar|vinegar)$/i, icon: '🫙' },
