@@ -1,0 +1,55 @@
+const EXCLUDED_RECIPE_INVENTORY = new Set(['milk', 'yogurt']);
+
+export const STAPLE_NAMES = new Set(['rice', 'noodle', 'bread', 'potato', 'sweet potato', 'corn', 'dumpling']);
+
+export const CONDIMENT_NAMES = new Set([
+  'soy sauce', 'cooking oil', 'oyster sauce', 'salt', 'sugar', 'cornstarch',
+  'rice vinegar', 'vinegar', 'black pepper', 'white pepper', 'garlic', 'ginger',
+  'scallion', 'fresh chili', "bird's eye chili", 'dried chili', 'pickled chili',
+  'chili oil', 'chili bean paste', 'sesame oil', 'cooking wine', 'water'
+]);
+
+function isPastExpiry(expiryDate) {
+  if (!expiryDate) return false;
+  const expiry = new Date(`${expiryDate}T23:59:59`);
+  return Number.isFinite(expiry.getTime()) && expiry < new Date();
+}
+
+export function isRecipeSelectableInventory(item) {
+  if (!item || ['staple', 'other', 'condiment'].includes(item.uiCategory)) return false;
+  return !EXCLUDED_RECIPE_INVENTORY.has(item.canonicalName) && !isPastExpiry(item.expiryDate);
+}
+
+export function recipeSelectableInventory(inventory = []) {
+  return inventory.filter(isRecipeSelectableInventory);
+}
+
+export function condimentInventory(inventory = []) {
+  return inventory.filter((item) => item.uiCategory === 'condiment');
+}
+
+export function coreRecipeIngredients(recipe) {
+  return (recipe.ingredients || []).filter((item) => !STAPLE_NAMES.has(item.canonicalName) && !CONDIMENT_NAMES.has(item.canonicalName));
+}
+
+export function isSpicyRequest(text = '') {
+  return /麻辣|香辣|酸辣|辣椒|小米辣|辣一点|微辣|中辣|重辣|想吃辣|要辣|辣/.test(text) && !/不要辣|不吃辣|不能吃辣|不辣/.test(text);
+}
+
+export function recipeHasChili(recipe) {
+  return (recipe.ingredients || []).some((item) => /chili/.test(item.canonicalName || '') || /辣椒|小米辣|泡椒|干辣椒/.test(item.name || ''));
+}
+
+export function missingCoreIngredients(recipe, inventory = []) {
+  const available = new Set(inventory.filter((item) => !isPastExpiry(item.expiryDate)).map((item) => item.canonicalName));
+  return coreRecipeIngredients(recipe).filter((item) => !available.has(item.canonicalName));
+}
+
+export function missingCondiments(recipe, inventory = []) {
+  const available = new Set(inventory.map((item) => item.canonicalName));
+  return (recipe.ingredients || []).filter((item) => CONDIMENT_NAMES.has(item.canonicalName) && !available.has(item.canonicalName) && item.canonicalName !== 'water');
+}
+
+export function isNamedDishRequest(text = '') {
+  return /宫保|鱼香|麻婆|水煮|回锅|红烧|咖喱|冬阴功|叻沙|佛跳墙|口水鸡|辣子鸡|酸菜鱼|锅包肉|炖牛肉|煲仔饭/.test(text);
+}
